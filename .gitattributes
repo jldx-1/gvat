@@ -15,6 +15,7 @@ LICENSE         text
 *.conf          text
 *.mimetypes     text
 *.sh            text eol=lf
+/src/bin/gvat   text eol=lf
 
 *.avi           binary
 *.bmp           binary

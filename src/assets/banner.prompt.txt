@@ -1,0 +1,5 @@
+Use case: precise-object-edit
+Asset type: existing GVAT GitHub README banner.
+Edit target: the original banner generated for this repository.
+Make only two changes. First, clip the entire rectangular banner panel to a rounded rectangle with clearly rounded outer corners, radius about 45 pixels at this image size. Keep the almost-white blue-tinted panel background intact inside the rounded rectangle; the small areas outside the four rounded corners must be truly transparent, not white. Second, add the exact text "Git Vision Annotation Tool" directly beneath the large "GVAT" wordmark on the left, in a clean smaller dark navy sans-serif font, aligned with the wordmark and comfortably readable.
+Preserve the existing GVAT wordmark, luminous blue/azure/violet ribbon, annotation brackets, wide 3:1 composition, lighting, and overall artwork. Do not add any other text or graphics. Output a PNG with alpha transparency only outside the rounded panel corners.

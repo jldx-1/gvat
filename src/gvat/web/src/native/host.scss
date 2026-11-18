@@ -1,0 +1,3 @@
+// CVAT normally reserves space for its global navigation. This entry point has none.
+html, body, #root { margin: 0; width: 100%; height: 100%; }
+#root > .cvat-annotation-page { height: 100vh; }

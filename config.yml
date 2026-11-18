@@ -1,0 +1,16 @@
+# Defaults copied to ~/.config/gvat/config.yml on first install (or XDG_CONFIG_HOME).
+# Later installs preserve your file. CLI options override these defaults.
+player:
+  step: 10
+  pixelated: false
+
+export:
+  # auto chooses CVAT for images 1.1 or CVAT for video 1.1 to match the sample.
+  # Run gvat --list-formats for other exact names, e.g. "YOLO 1.1".
+  dataset_format: auto
+  labels_format: auto
+
+buffer:
+  seconds: 15
+  # null uses the automatic RAM cap; examples: "4GiB", "512MiB".
+  max_memory: null

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gvat-local"
+version = "0.1.0"
+description = "Launch CVAT's annotation and review workspaces on local files"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "Pillow==11.3.0",
+    "PyYAML==6.0.2",
+    "imageio-ffmpeg==0.6.0",
+    "paramiko==5.1.0",
+    # Match the exporter engine pinned by the vendored CVAT release.
+    "datumaro @ https://github.com/cvat-ai/datumaro/archive/335fc3e55fe699b9401091f6af11f10c3b0e08cb.zip",
+]
+
+[project.scripts]
+gvat = "gvat_local.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

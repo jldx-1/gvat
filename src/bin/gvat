@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Resolve the installation link so data arguments remain relative to the user's cwd.
+SCRIPT="$(readlink -f -- "${BASH_SOURCE[0]}")"
+ROOT="$(cd -- "$(dirname -- "$SCRIPT")/../.." && pwd)"
+if [[ "$(uname -s)" != Linux ]]; then
+    printf '%s\n' 'GVAT currently supports Linux only.' >&2
+    exit 1
+fi
+if [[ "${1:-}" == --init ]]; then
+    shift
+    exec "$ROOT/install.sh" "$@"
+fi
+if [[ ! -x "$ROOT/.venv-gvat/bin/python" || ! -f "$ROOT/src/gvat/web/dist/index.html" ]]; then
+    if [[ -t 0 ]]; then
+        read -r -p 'GVAT needs setup. Install dependencies and build the editor now? [y/N] ' ANSWER
+        if [[ "$ANSWER" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+            "$ROOT/install.sh"
+        else
+            printf '%s\n' 'Run ./install.sh when ready.' >&2
+            exit 1
+        fi
+    else
+        printf '%s\n' 'GVAT needs installation. Run ./install.sh or ./src/bin/gvat --init first.' >&2
+        exit 1
+    fi
+fi
+exec "$ROOT/.venv-gvat/bin/python" -m gvat_local "$@"

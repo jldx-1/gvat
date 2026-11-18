@@ -1,0 +1,17 @@
+# Optional convenience commands; just is not required to install or run GVAT.
+set shell := ["bash", "-eu", "-c"]
+
+setup *args:
+    ../install.sh {{args}}
+
+run *args:
+    ./bin/gvat {{args}}
+
+test:
+    ../.venv-gvat/bin/python -m unittest discover -s gvat/tests -v
+
+build:
+    cd gvat/web && npm run build
+
+test-ui:
+    cd gvat/web && npm run test:e2e
