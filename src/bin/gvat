@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Resolve the installation link so data arguments remain relative to the user's cwd.
-SCRIPT="$(readlink -f -- "${BASH_SOURCE[0]}")"
-ROOT="$(cd -- "$(dirname -- "$SCRIPT")/../.." && pwd)"
-if [[ "$(uname -s)" != Linux ]]; then
+SCRIPT="${BASH_SOURCE[0]}"
+if [[ -L "$SCRIPT" ]]; then SCRIPT="$(readlink -f -- "$SCRIPT")"; fi
+SCRIPT_DIRECTORY="${SCRIPT%/*}"
+if [[ "$SCRIPT_DIRECTORY" == "$SCRIPT" ]]; then SCRIPT_DIRECTORY=.; fi
+ROOT="$(cd -P -- "$SCRIPT_DIRECTORY/../.." && pwd -P)"
+if [[ "${OSTYPE:-}" != linux* ]]; then
     printf '%s\n' 'GVAT currently supports Linux only.' >&2
     exit 1
 fi

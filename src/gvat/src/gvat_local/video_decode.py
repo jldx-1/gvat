@@ -71,7 +71,7 @@ class DecodeTask:
 def index_video(path: Path) -> dict:
     """Record presentation order and integer timestamps in the counting pass."""
     command = ffmpeg_input(path) + ["-v", "info", "-copyts", "-map", "0:v:0", "-an", "-sn",
-                                      "-filter_threads", "1", "-vf", "showinfo", "-vsync", "0", "-f", "null", "-"]
+                                      "-filter_threads", "1", "-vf", "showinfo=checksum=0", "-vsync", "0", "-f", "null", "-"]
     points, keyframes, time_base = [], [], None
     with tempfile.TemporaryFile() as log:
         DecodeTask().run(command, log, timeout=None)

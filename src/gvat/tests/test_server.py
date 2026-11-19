@@ -7,7 +7,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -73,6 +73,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request("/api/image?path=one.png&revision=old")[0], 409)
         self.assertEqual(self.request("/api/image?path=one.png")[0], 200)
 
+    def test_only_content_hashed_assets_are_cached(self):
+        name = 'editor.' + 'a' * 20 + '.js'
+        (self.root / 'assets' / name).write_text('console.log("GVAT")')
+        for path, expected in (('/' + name, 'public, max-age=31536000, immutable'), ('/', 'no-store'), ('/api/workspace', 'no-store')):
+            request = urllib.request.Request(self.server.origin + path, headers={'Authorization': 'Bearer test-secret'})
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.headers['Cache-Control'], expected)
+
     @unittest.skipUnless(sys.platform == "linux", "Linux TCP port reuse regression")
     def test_can_restart_on_same_port_immediately_after_serving_browser_request(self):
         port = self.server.server_port
@@ -98,6 +106,12 @@ class ServerTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, f"Port {self.server.server_port} is already in use.*--port=0"):
             LocalServer(self.workspace, self.root / "assets", "another-session", self.server.server_port)
         self.assertEqual(self.request("/")[0], 200)
+
+    def test_loopback_binding_does_not_wait_for_reverse_dns(self):
+        with patch('socket.getfqdn', side_effect=AssertionError('Reverse DNS during startup')):
+            with LocalServer(self.workspace, self.root / 'assets', 'other-session', 0) as server:
+                self.assertEqual(server.server_name, 'localhost')
+                self.assertGreater(server.server_port, 0)
 
     def test_abandoned_response_does_not_send_another_error_on_closed_socket(self):
         for failure in (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):

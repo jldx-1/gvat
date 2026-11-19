@@ -6,10 +6,12 @@ import errno
 import hmac
 import json
 import mimetypes
+import re
 import select
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from urllib.parse import parse_qs, urlsplit
 
 from .workspace import Conflict, Workspace, WorkspaceError, contained
@@ -21,6 +23,13 @@ class LocalServer(ThreadingHTTPServer):
     # Linux keeps closed browser connections in TIME_WAIT after Ctrl+C.
     # SO_REUSEADDR permits an immediate restart, while a live listener still wins.
     allow_reuse_address = True
+
+    def server_bind(self):
+        # This is always a loopback server. Reverse DNS can otherwise delay a
+        # launch on machines whose resolver is slow or unavailable.
+        TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
 
     def __init__(self, workspace: Workspace, assets: Path, token: str, port: int = 8080):
         self.workspace = workspace
@@ -51,12 +60,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         super().log_message(format, *args)
 
-    def _send(self, status: int, data: bytes, content_type: str) -> None:
+    def _send(self, status: int, data: bytes, content_type: str, cache_control='no-store') -> None:
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache_control)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")
@@ -122,7 +131,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not file.is_file():
                     self._json(404, {"error": "Asset not found. Run ./install.sh to build the editor."})
                     return
-                self._send(200, file.read_bytes(), mimetypes.guess_type(file.name)[0] or "application/octet-stream")
+                policy = 'public, max-age=31536000, immutable' if re.search(r'\.[a-f0-9]{16,}\.(js|css)$', file.name) else 'no-store'
+                self._send(200, file.read_bytes(), mimetypes.guess_type(file.name)[0] or "application/octet-stream", policy)
                 return
             supplied = self.headers.get("Authorization", "")
             if not hmac.compare_digest(supplied, f"Bearer {self.server.token}"):

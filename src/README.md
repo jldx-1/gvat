@@ -46,8 +46,14 @@ Options:
 `--data_path` selects one flat folder. Pillow and FFmpeg identify files by content.
 Only files directly in that folder are indexed. Image-only, video-only, and mixed
 media are supported. Animated images and multi-page images expose native frames.
+`media.preferred_type` in the root config, or `--media-type`, chooses `images`,
+`video`, or `all`. Images are preferred by default with fallback when absent.
+Existing XML chooses its matching source type. Use `all` for an explicitly mixed
+image-style task, or choose another XML to create a task on the other source type.
 Optional decoder helpers must already be available; for example, EPS needs
-Ghostscript. Missing or unreadable media produces an error before XML creation.
+Ghostscript. Missing media, unreadable headers and a failed first-image decode
+produce an error before XML creation. Later image pixels are validated when their
+chunks are requested, with decode errors reported without changing annotations.
 
 The XML is the annotation source. GVAT uses the folder's single `.xml` file or
 offers to create `annotations.xml` if none exists. With multiple XML files,
@@ -90,6 +96,32 @@ bytes and modification times. Changed XML is replaced atomically with revision
 checks. Flipped and multi-task video exports require separate preparation.
 
 ## Runtime and review
+
+Source headers, pixel-validation results and video content hashes are cached in
+`$XDG_CACHE_HOME/gvat/source-metadata/index.sqlite3`. Cache entries include device,
+inode, size, nanosecond modification time and change time. Replacing or changing
+a source invalidates its entry. Startup batches metadata writes in one transaction,
+reuses known dimensions, and does not initialize every Pillow plugin up front.
+Missing or malformed cached records are rebuilt. `--purge-cache` removes this cache.
+New image cache identities use the stable filesystem version rather than hashing
+every source file before startup. Previously cached image identities remain usable.
+The first image is validated before opening; subsequent direct image chunks
+validate their pixels before delivery, including EXIF orientation. Validation is
+reused for unchanged sources. Image metadata cache version 1 is migrated safely.
+
+The shell launcher uses builtins for normal path/platform checks and resolves
+installed symlinks when needed. Plain help/version commands bypass configuration,
+Pillow, FFmpeg and SSH initialization. Normal commands validate configuration
+before preparing media. Loopback binding skips reverse DNS. Browser opening runs
+in a daemon thread so slow desktop integration does not delay HTTP handling.
+
+Native chunks carry normal-orientation JPEG/PNG bytes directly. TIFF pages,
+animated images, EXIF-rotated JPEGs and other formats retain lossless PNG previews;
+conversion uses fast compression without changing pixels or coordinate geometry.
+Chunk reads validate only their source files; saves still validate the full active
+source inventory. Annotation snapshots use indexed frame lookups and cached sizes.
+Content-hashed JS/CSS bundles are immutable browser cache entries; HTML, tokens,
+metadata and API responses remain uncached.
 
 Video frames are indexed by source content hash, presentation timestamps, and
 keyframes. CVAT's native frame decoder, chunk cache, and prefetcher load lossless
@@ -187,6 +219,8 @@ by remote size/mtime. XML and review metadata refresh from the server; mutations
 check revisions and use `posix-rename` atomic replacement. Changed remote media
 requires a restart. No source media is written back. `--purge-cache` removes the
 local SSH cache, preserving the authoritative remote files.
+Remote source validation uses one SFTP directory listing rather than a request
+for each image.
 
 ## Development
 

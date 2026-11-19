@@ -1,6 +1,7 @@
 """Generate flat XML samples and one shared class list for browser checks."""
 
 import sys
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from video_fixtures import make_video
 root = Path(sys.argv[1])
 (root / "videos").mkdir(parents=True)
 (root / "images").mkdir()
+(root / "photos").mkdir()
 (root / "labels.txt").write_text("cat\ndog\n")
 frames = []
 video_frames = int(sys.argv[2]) if len(sys.argv) > 2 else 3
@@ -26,9 +28,12 @@ for number in range(1, video_frames + 1):
     draw.text((30, 30), f"GVAT example {number}", fill="#263b31")
     frames.append(image)
 make_video(root / "videos/source.mp4", frames)
+shutil.copyfile(root / 'videos/source.mp4', root / 'photos/source.mp4')
+frames[0].save(root / 'photos/one.jpg', quality=95)
+frames[1].save(root / 'photos/two.png')
 frames[0].save(root / "images/image_01.tiff")
 frames[1].save(root / "images/sequence.gif", save_all=True, append_images=[frames[2]], duration=500, loop=0)
-for kind in ("images", "videos"):
+for kind in ("images", "videos", "photos"):
     document = ET.fromstring(CvatDocument.create(["cat", "dog"], (800, 600, video_frames) if kind == "videos" else None, image_count=3))
     for label in document.findall("meta/task/labels/label"):
         attribute = ET.SubElement(label.find("attributes"), "attribute")
@@ -37,7 +42,7 @@ for kind in ("images", "videos"):
     if kind == "videos":
         parent = ET.SubElement(document, "track", {"id": "7", "label": "cat", "source": "auto", "group_id": "7"})
     else:
-        parent = ET.SubElement(document, "image", {"id": "0", "name": "image_01.tiff", "width": "800", "height": "600"})
+        parent = ET.SubElement(document, "image", {"id": "0", "name": "one.jpg" if kind == 'photos' else "image_01.tiff", "width": "800", "height": "600"})
     box = ET.SubElement(parent, "box", {"xtl": "240", "ytl": "180", "xbr": "560", "ybr": "420", "occluded": "1", "group_id": "7"})
     if kind == "videos":
         box.attrib.update({"frame": "0", "outside": "0", "keyframe": "1"})

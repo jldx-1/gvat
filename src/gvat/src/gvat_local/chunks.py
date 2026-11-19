@@ -72,7 +72,7 @@ class MediaChunks:
                 cached = None
         if cached is not None:
             with self.workspace.lock:
-                self.workspace._check_sources()
+                self.workspace._check_frame_sources(selected)
             return cached
         with self.lock:
             if self.closed or self.intent.get(view) != (desired, generation):
@@ -117,10 +117,18 @@ class MediaChunks:
     def _build(self, keys, task):
         workspace = self.workspace
         with workspace.lock:
-            workspace._check_sources()
+            workspace._check_frame_sources(keys)
         # Expensive decoding never holds the XML/workspace lock. A newer seek
         # can terminate FFmpeg immediately, and annotation saves remain responsive.
         paths = {key: workspace.data / f"{hashlib.sha256(key.encode()).hexdigest()}.png" for key in keys}
+        extensions = {key: 'png' for key in keys}
+        for key in keys:
+            task.check()
+            source, _ = workspace._frames[key]
+            direct = workspace.image_format(source) if source.kind == 'image' else None
+            if direct:
+                paths[key] = source.path
+                extensions[key] = direct
         for source, grouped in groupby(keys, lambda key: workspace._frames[key][0]):
             group = list(grouped)
             task.check()
@@ -129,14 +137,13 @@ class MediaChunks:
             if source.kind == "image":
                 for key in group:
                     task.check()
-                    with workspace.lock:
-                        workspace._ensure_frame(key)
+                    workspace._ensure_frame(key, check_sources=False)
             else:
                 numbers = [workspace._frames[key][1] for key in group]
                 with tempfile.TemporaryDirectory(prefix=".decode-", dir=workspace.data) as directory:
                     decoded = decode_batch(source, numbers, workspace.video_indexes[source.path], Path(directory), task)
                     with workspace.lock:
-                        workspace._check_sources()
+                        workspace._check_frame_sources(keys)
                         for key, file in zip(group, decoded):
                             task.check()
                             with Image.open(file) as image:
@@ -148,10 +155,10 @@ class MediaChunks:
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
             for number, key in enumerate(keys):
                 task.check()
-                archive.write(paths[key], f"{number:08d}.png")
+                archive.write(paths[key], f"{number:08d}.{extensions[key]}")
         result = output.getvalue()
         with workspace.lock:
-            workspace._check_sources()
+            workspace._check_frame_sources(keys)
         with self.lock:
             task.check()
             if len(result) <= 64 * 1024 * 1024:

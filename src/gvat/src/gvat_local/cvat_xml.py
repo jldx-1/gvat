@@ -20,8 +20,8 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image
 
-from .media import MediaWorkspace, count_video_frames, ffmpeg_input
-from .workspace import Conflict, WorkspaceError, atomic_write, digest, same_boxes, validate_box
+from .media import MediaWorkspace, ffmpeg_input, source_revision, video_index
+from .workspace import Conflict, WorkspaceError, atomic_write, contained, digest, same_boxes, validate_box
 
 
 def integer(value: str | None, name: str, minimum: int = 0) -> int:
@@ -61,6 +61,31 @@ def serialize_xml(root: ET.Element) -> bytes:
     return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(
         root, encoding="utf-8", short_empty_elements=False,
     ) + b"\n"
+
+
+def annotation_media_type(path, data):
+    """Preserve an existing XML's media binding when a folder also has exports."""
+    document = CvatDocument(path.read_bytes(), native=True)
+    if document.root.findall('track') or document.root.findtext('meta/task/mode') == 'interpolation':
+        return 'video'
+    kinds = set()
+    from .media import probe_media
+
+    for image in document.root.findall('image'):
+        relative = PurePosixPath(image.get('name', ''))
+        if not relative.parts or relative.is_absolute() or '..' in relative.parts or '\\' in str(relative):
+            raise WorkspaceError('CVAT XML image names must be relative POSIX media paths')
+        if len(relative.parts) == 1 and (data / str(relative)).is_file():
+            kinds.add('images')
+        elif len(relative.parts) > 1:
+            source = contained(data, relative.parts[0])
+            if source.is_file():
+                candidate = probe_media(source)
+                if candidate:
+                    kinds.add('images' if candidate.kind == 'image' else 'video')
+        elif re.fullmatch(r'frame_\d+\.[^.]+', str(relative)):
+            kinds.add('video')
+    return 'all' if len(kinds) > 1 else next(iter(kinds), None)
 
 
 class CvatDocument:
@@ -160,13 +185,16 @@ class CvatDocument:
             command = ffmpeg_input(source) + ["-map", "0:v:0", "-an", "-sn", "-frames:v", "1",
                        "-filter_threads", "1", "-f", "image2pipe", "-vcodec", "png", "-threads", "1", "pipe:1"]
             try:
-                raw = subprocess.run(command, capture_output=True, check=True, timeout=120).stdout
-                with Image.open(io.BytesIO(raw)) as image:
-                    width, height = image.size
-                video = width, height, count_video_frames(source)
+                if candidates[0].dimensions:
+                    width, height = candidates[0].dimensions[0]
+                else:
+                    raw = subprocess.run(command, capture_output=True, check=True, timeout=120).stdout
+                    with Image.open(io.BytesIO(raw)) as image:
+                        width, height = image.size
+                video = width, height, video_index(source, source_revision(candidates[0]))['frames']
             except (OSError, subprocess.SubprocessError) as error:
                 raise WorkspaceError(f"Cannot initialize CVAT XML for {source.name}: {error}") from error
-        count = sum(candidate.frames if candidate.kind == "image" else count_video_frames(candidate.path)
+        count = sum(candidate.frames if candidate.kind == "image" else video_index(candidate.path, source_revision(candidate))['frames']
                     for candidate in candidates) if video is None else 0
         return cls.create(names, video, image_count=count, name=candidates[0].path.parent.name)
 

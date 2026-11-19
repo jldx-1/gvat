@@ -12,14 +12,17 @@ import stat
 import tempfile
 import threading
 import uuid
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 from PIL import Image
 
-Image.init()
-IMAGE_EXTENSIONS = {extension for extension, format_name in Image.registered_extensions().items() if format_name in Image.OPEN}
+@lru_cache(maxsize=1)
+def image_extensions():
+    # Import uncommon Pillow plugins only when discovery actually needs them.
+    return {extension for extension, format_name in Image.registered_extensions().items() if format_name in Image.OPEN}
 
 
 class WorkspaceError(ValueError):
@@ -176,7 +179,7 @@ class Workspace:
     def scan(self) -> list[str]:
         images = sorted(
             item.relative_to(self.data).as_posix() for item in self.data.rglob("*")
-            if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
+            if item.is_file() and item.suffix.lower() in image_extensions()
             and not any(part.startswith(".") for part in item.relative_to(self.data).parts)
             and item.resolve().is_relative_to(self.data)
         )
@@ -192,7 +195,7 @@ class Workspace:
 
     def paths(self, image: str) -> tuple[Path, Path]:
         source = contained(self.data, image)
-        if source.suffix.lower() not in IMAGE_EXTENSIONS or not source.is_file():
+        if source.suffix.lower() not in image_extensions() or not source.is_file():
             raise WorkspaceError(f"Image does not exist: {image}. Refresh the sample.")
         target = contained(self.labels, Path(image).with_suffix(".txt").as_posix())
         if target == self.class_file:

@@ -39,20 +39,26 @@ class NativeSession:
 
     def snapshot(self):
         with self.workspace.lock:
-            self._load_reviews()
             workspace = self.workspace
             workspace._check_sources()
             document = workspace.document()
+            self._load_reviews(document)
             keys = list(document.selected or workspace._frames)
+            key_numbers = {key: number for number, key in enumerate(keys)}
             frames = []
             for key in keys:
                 source, page = workspace._frames[key]
                 if source.kind == "image":
-                    with Image.open(source.path) as opened:
-                        opened.seek(page)
-                        width, height = opened.size
+                    if source.dimensions:
+                        width, height = source.dimensions[page]
+                    else:
+                        with Image.open(source.path) as opened:
+                            opened.seek(page)
+                            width, height = opened.size
                 else:
                     width, height = document.dimensions.get(key, (0, 0))
+                    if not width and source.dimensions:
+                        width, height = source.dimensions[0]
                     if not width:
                         with Image.open(workspace._ensure_frame(key)) as opened:
                             width, height = opened.size
@@ -122,7 +128,7 @@ class NativeSession:
             for key, image in document.images.items():
                 for element in image:
                     if element.tag in TYPES:
-                        item = shape(element, keys.index(key))
+                        item = shape(element, key_numbers[key])
                         annotations["tags" if element.tag == "tag" else "shapes"].append(item)
             for identifier, (track, numbers, elements) in document.tracks.items():
                 shapes = [shape(element, frame_index(number), track.get("label"), tracked=True) for number, element in zip(numbers, elements) if element.get("keyframe", "1") != "0"]
@@ -358,8 +364,11 @@ class NativeSession:
     def _review_keys(self):
         return list(self.workspace.document().selected or self.workspace._frames)
 
-    def _load_reviews(self):
-        self.issues, self.issue_counter, self.comment_counter = self.review_file.load(self._review_keys())
+    def _load_reviews(self, document=None):
+        if document is None and (self.review_file.path.is_file() or getattr(self.workspace, 'remote', None)):
+            document = self.workspace.document()
+        keys = list(document.selected or self.workspace._frames) if document else list(self.workspace._frames)
+        self.issues, self.issue_counter, self.comment_counter = self.review_file.load(keys)
 
     @contextmanager
     def _review_change(self):

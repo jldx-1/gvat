@@ -51,5 +51,5 @@ for relative in (
     remove_artifact(root / relative, root)
 if sys.argv[3] == "1":
     cache_root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser().resolve()
-    for generated in ("node", "frames", "video-index", "build-tools", "ssh"):
+    for generated in ("node", "frames", "video-index", "source-metadata", "build-tools", "ssh"):
         remove_artifact(cache_root / "gvat" / generated, cache_root)

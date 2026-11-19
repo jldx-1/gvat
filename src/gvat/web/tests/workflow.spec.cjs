@@ -403,3 +403,27 @@ test.describe('Configured native CVAT defaults', () => {
         await expect(page.locator('.cvat-player-settings-step input')).toHaveValue('2');
     });
 });
+
+test.describe('Direct JPEG and PNG image delivery', () => {
+    test.use({ mediaType: 'photos' });
+    test('prioritizes images over accompanying video and displays original image chunks', async ({ page, session }) => {
+        const bootstrap = page.waitForResponse((response) => response.url().endsWith('/api/cvat/session'));
+        const firstChunk = page.waitForResponse((response) => response.url().includes('/api/cvat/chunks?'));
+        await open(page, session);
+        const boot = await (await bootstrap).json();
+        expect(boot.frames).toEqual(['one.jpg', 'two.png']);
+        const zip = await require('jszip').loadAsync(await (await firstChunk).body());
+        expect(Buffer.compare(await zip.file('00000000.jpg').async('nodebuffer'), fs.readFileSync(path.join(session.data, 'one.jpg')))).toBe(0);
+        expect(Buffer.compare(await zip.file('00000001.png').async('nodebuffer'), fs.readFileSync(path.join(session.data, 'two.png')))).toBe(0);
+        const before = snapshot(session.data);
+        await page.locator('.cvat-player-next-button').click();
+        await expect(page.locator('.cvat-player-filename-wrapper')).toHaveText('two.png');
+        await draw(page, 'rectangle', [[.1, .1], [.3, .4]]);
+        await save(page);
+        expect(fs.readFileSync(session.xml, 'utf8')).toContain('name="two.png"');
+        for (const [name, value] of Object.entries(before)) {
+            if (name !== 'annotations.xml') expect(snapshot(session.data)[name]).toEqual(value);
+        }
+        expect(session.errors()).not.toMatch(/Traceback|BrokenPipeError/);
+    });
+});

@@ -34,6 +34,8 @@ def load_config(path=None):
                         raise ValueError(f'Unknown config setting: {section}.{key}')
                     defaults[section][key] = value
         player, buffering = defaults['player'], defaults['buffer']
+        if defaults['media']['preferred_type'] not in ('images', 'video', 'all'):
+            raise ValueError('media.preferred_type must be images, video or all')
         if type(player['step']) is not int or not 1 <= player['step'] <= 10000:
             raise ValueError('player.step must be an integer between 1 and 10000')
         if type(player['pixelated']) is not bool:
@@ -42,11 +44,11 @@ def load_config(path=None):
             raise ValueError('buffer.seconds must be greater than 0 and at most 3600')
         if buffering['max_memory'] is not None:
             memory_size(str(buffering['max_memory']))
-        from .exports import catalog
-
         for key, value in defaults['export'].items():
-            if value != 'auto' and value not in catalog():
-                raise ValueError(f'Unknown export format in export.{key}. Run gvat --list-formats for exact names.')
+            if value != 'auto':
+                from .exports import catalog
+                if value not in catalog():
+                    raise ValueError(f'Unknown export format in export.{key}. Run gvat --list-formats for exact names.')
         return copy.deepcopy(defaults)
     except (OSError, ValueError, TypeError, yaml.YAMLError) as error:
         raise WorkspaceError(f'Invalid GVAT config: {error}') from error

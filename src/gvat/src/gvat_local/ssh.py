@@ -169,6 +169,7 @@ class SSHMirror:
     def download(self):
         with self.lock:
             present = set()
+            self.inventory = {}
             for entry in self.sftp.listdir_attr(self.remote_root):
                 name = entry.filename
                 if name.startswith('.') or not stat.S_ISREG(entry.st_mode):
@@ -176,6 +177,7 @@ class SSHMirror:
                 if name != Path(name).name or '\\' in name:
                     raise WorkspaceError('Invalid SSH sample filename')
                 present.add(name)
+                self.inventory[name] = signature(entry)
                 remote, local = posixpath.join(self.remote_root, name), self.sample / name
                 self.paths[local] = remote
                 if name.lower().endswith('.xml') or name == 'reviews.json':
@@ -218,7 +220,8 @@ class SSHMirror:
 
     def bind(self, workspace):
         self.paths.setdefault(workspace.xml_file, posixpath.join(self.remote_root, workspace.xml_file.name))
-        self.sources = {source.path.name: signature(self.sftp.stat(self.paths[source.path])) for source in workspace.sources}
+        self.sources = {source.path.name: self.inventory[source.path.name] for source in workspace.sources}
+        self.check_sources(force=True)
         workspace.remote = self
         # A newly created XML is published before the browser opens.
         remote = self.paths[workspace.xml_file]
@@ -229,12 +232,9 @@ class SSHMirror:
         with self.lock:
             if not force and time.monotonic() - self.last_source_check < 1:
                 return
+            actual = {entry.filename: signature(entry) for entry in self.sftp.listdir_attr(self.remote_root) if stat.S_ISREG(entry.st_mode)}
             for name, expected in self.sources.items():
-                try:
-                    actual = signature(self.sftp.stat(posixpath.join(self.remote_root, name)))
-                except OSError as error:
-                    raise Conflict('SSH source media is missing. Restart GVAT after restoring it.') from error
-                if actual != expected:
+                if actual.get(name) != expected:
                     raise Conflict('SSH source media changed. Restart GVAT before continuing.')
             self.last_source_check = time.monotonic()
 

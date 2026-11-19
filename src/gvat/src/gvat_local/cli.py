@@ -8,46 +8,16 @@ import os
 import secrets
 import signal
 import sys
-import webbrowser
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import __version__
+from .arguments import parser
 from .workspace import WorkspaceError, atomic_write, load_classes
-from .media import discover_media
+from .media import discover_media, validate_image
 from .cvat_xml import CvatDocument, CvatXmlWorkspace
-from .buffering import memory_size
-from .ssh import input_locations, location
+from .ssh import input_locations
 from .configuration import load_config
-
-
-def parser(settings=None) -> argparse.ArgumentParser:
-    settings = settings or load_config()
-    result = argparse.ArgumentParser(prog="gvat", description="Label or review a local directory using the CVAT canvas. No Docker, accounts, or Git integration.")
-    result.set_defaults(settings=settings)
-    result.add_argument('--config', type=Path, help='Use a particular config.yml instead of the user defaults')
-    result.add_argument("--version", action="version", version=f"gvat {__version__}")
-    result.add_argument("--data_path", "--data-path", type=location, help="Flat sample folder, local or ssh://[user@]host[:port]/path")
-    result.add_argument("--labels", "--classes", type=location, help="Local/SSH shared labels.txt; used to initialize missing XML")
-    result.add_argument("--annotations", "--xml", type=location, help="CVAT XML file (default: discover the single XML in DATA_PATH, or create annotations.xml)")
-    result.add_argument("--class-names", help="Comma-separated class names for initializing missing XML")
-    result.add_argument("--mode", choices=("auto", "annotate", "review"), default="auto")
-    result.add_argument('--step', type=int, default=settings['player']['step'], help='Native player step size in frames')
-    display = result.add_mutually_exclusive_group()
-    display.add_argument('--pixelated', action='store_true', default=settings['player']['pixelated'], help='Disable CVAT smooth image rendering')
-    display.add_argument('--smooth-images', dest='pixelated', action='store_false', help='Enable CVAT smooth image rendering')
-    result.add_argument("--buffer-seconds", type=float, default=settings['buffer']['seconds'], help="Decoded video buffer target in seconds (default from config; capped by available RAM)")
-    result.add_argument("--buffer-memory", type=memory_size, default=memory_size(str(settings['buffer']['max_memory'])) if settings['buffer']['max_memory'] is not None else None, help="Upper memory limit for the decoded buffer, e.g. 4GiB")
-    result.add_argument("--port", type=int, default=8080, help="Loopback port (default: 8080; 0 chooses an available port)")
-    result.add_argument("--no-browser", action="store_true", help="Print the session URL without opening a browser")
-    result.add_argument("--yes", "-y", action="store_true", help="Create missing XML using supplied/discovered class names")
-    exports = result.add_mutually_exclusive_group()
-    exports.add_argument('--export-labels', type=Path, metavar='OUTPUT.zip', help='Export annotations and exit without opening the browser')
-    exports.add_argument('--export-dataset', type=Path, metavar='OUTPUT.zip', help='Export annotations with media and exit')
-    result.add_argument('--format', '--export-format', help='Exact CVAT export format name, e.g. "YOLO 1.1"')
-    result.add_argument('--list-formats', action='store_true', help='List available CVAT image/video export formats and exit')
-    result.add_argument('--overwrite', action='store_true', help='Replace an existing CLI export destination')
-    return result
+from .source_cache import source_cache_session
 
 
 def ask(prompt: str) -> str:
@@ -129,10 +99,21 @@ def annotation_file(args: argparse.Namespace, data: Path) -> Path:
     return selected
 
 
+@source_cache_session()
 def prepare(args: argparse.Namespace) -> CvatXmlWorkspace:
     data = directory(args.data_path, "Media")
-    candidates = discover_media(data, recursive=False)
     selected = annotation_file(args, data)
+    from .cvat_xml import annotation_media_type
+
+    preferred = args.media_type
+    if preferred != 'all' and selected.is_file():
+        preferred = annotation_media_type(selected, data) or preferred
+    excluded = [selected, data / 'reviews.json', data / 'labels.txt']
+    if args.labels:
+        excluded.append(args.labels.expanduser().resolve())
+    candidates = discover_media(data, tuple(excluded), recursive=False, preferred=preferred)
+    if candidates[0].kind == 'image':
+        candidates[0] = validate_image(candidates[0])
     created = False
     while not selected.is_file():
         answer = "y" if args.yes and not selected.exists() else ask(f"XML file {selected} is missing. Create it? [y/N], or enter a corrected XML path:")
@@ -145,6 +126,8 @@ def prepare(args: argparse.Namespace) -> CvatXmlWorkspace:
             if selected.suffix.lower() != ".xml" or selected.is_dir():
                 raise WorkspaceError("Select a CVAT .xml file")
     workspace = CvatXmlWorkspace(data, selected, candidates=candidates, native_ui=True)
+    kinds = {candidate.kind for candidate in candidates}
+    workspace.preferred_media = 'all' if len(kinds) > 1 else 'images' if kinds == {'image'} else 'video'
     if not created and (args.labels or args.class_names) and not getattr(args, '_discovered_labels', False):
         if choose_classes(args, data) != list(workspace.document().classes.values()):
             raise WorkspaceError("labels.txt does not match the XML's classes. Update the class list or omit --labels to use the XML definitions.")
@@ -201,7 +184,8 @@ def main() -> None:
         arguments.exit(2, "GVAT currently supports Linux only. Run ./install.sh and gvat from a Linux shell.\n")
     if not 0 <= args.port <= 65535:
         arguments.error("--port must be between 0 and 65535")
-    from .exports import catalog
+    if args.list_formats or args.format:
+        from .exports import catalog
 
     if args.list_formats:
         print('\n'.join(sorted(catalog())))
@@ -244,6 +228,7 @@ def main() -> None:
 
 def serve(workspace, assets, args):
     from .server import LocalServer
+    import threading
 
     annotation_path = workspace.xml_file
     with LocalServer(workspace, assets, secrets.token_urlsafe(32), args.port) as server:
@@ -252,13 +237,22 @@ def serve(workspace, assets, args):
         print(f"GVAT {workspace.mode} mode. Changes save to {destination}")
         print(f"Open {url}", flush=True)
         print("Press Ctrl+C to stop. Unsaved browser edits must be saved before stopping.", flush=True)
-        if not args.no_browser:
-            webbrowser.open(url)
         def stop(*_):
             raise KeyboardInterrupt
 
         signal.signal(signal.SIGTERM, stop)
+        if not args.no_browser:
+            threading.Thread(target=_open_browser, args=(url,), name='gvat-browser', daemon=True).start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             print("\nGVAT stopped.")
+
+
+def _open_browser(url):
+    import webbrowser
+
+    try:
+        webbrowser.open(url)
+    except (OSError, webbrowser.Error):
+        print('Could not open a browser automatically. Use the printed URL.', file=sys.stderr)

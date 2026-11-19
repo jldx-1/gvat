@@ -38,6 +38,8 @@ The first install copies the root [config.yml](config.yml) to
 preserve your settings. Edit that file to set your defaults:
 
 ```yaml
+media:
+  preferred_type: images
 player:
   step: 10
   pixelated: false
@@ -56,6 +58,13 @@ cap. Restart GVAT after changing the file. `--config="./config.yml"` selects a
 different config, and `GVAT_CONFIG` can select its path for installation and use.
 CLI flags such as `--step=5`, `--pixelated`, `--smooth-images`,
 `--buffer-seconds=30`, and `--buffer-memory=4GiB` override the file.
+
+`media.preferred_type` chooses `images`, `video`, or `all` in folders containing
+both images and video. The default prefers images, falling back to video if
+there are no images. Set it to `video` to reverse that preference, or use
+`--media-type=video` for one command. `all` combines both types. Existing XML
+selects its matching media so a changed preference does not reinterpret saved
+annotations; choose another XML with `--annotations` to start a different task.
 
 To uninstall:
 
@@ -117,6 +126,18 @@ Video buffering targets **15 seconds** of decoded frames and can use several
 GiB when available. It reserves half of currently available RAM for other work.
 Use `--buffer-seconds=30` to change the target or `--buffer-memory=4GiB` to set a
 smaller upper memory limit.
+
+Startup reads image headers and checks the first image; additional image pixels
+are validated as their chunks are requested. It avoids decoding and hashing an
+entire image folder before opening. Cached metadata speeds up later starts;
+file identity, size, and modification/change timestamps invalidate changed entries.
+JPEG and PNG images with normal orientation are
+sent directly to CVAT without converting them. Other image formats retain
+lossless previews and their original pixel coordinates. Previews and metadata
+stay outside the sample folder; source images are never resized or rewritten.
+Opening the browser runs in the background, so it does not block the local
+server. `gvat --help` and `gvat --version` use a lightweight startup path.
+New videos still need an initial frame index; later launches reuse it.
 
 Choose **Menu → Export labels** for annotations only, or **Menu → Export dataset**
 to include source images/video frames. Both use CVAT's native export dialog and
