@@ -1,4 +1,4 @@
-"""Generate flat XML samples and one shared class list for browser checks."""
+"""Generate synthetic CVAT samples and one shared class list for browser checks."""
 
 import sys
 import shutil
@@ -51,3 +51,19 @@ for kind in ("images", "videos", "photos"):
         box.set("label", "cat")
     ET.SubElement(box, "attribute", {"name": "pose"}).text = "standing"
     (root / kind / "annotations.xml").write_bytes(ET.tostring(document, encoding="utf-8", xml_declaration=True))
+
+# The layout of an extracted CVAT export: XML names omit the images/ wrapper.
+(root / 'nested/images/camera').mkdir(parents=True)
+shutil.copyfile(root / 'photos/one.jpg', root / 'nested/images/camera/one.jpg')
+shutil.copyfile(root / 'photos/two.png', root / 'nested/images/camera/two.png')
+document = ET.parse(root / 'photos/annotations.xml')
+document.find('image').set('name', 'camera/one.jpg')
+document.write(root / 'nested/annotations.xml', encoding='utf-8', xml_declaration=True)
+
+(root / 'stills').mkdir()
+for number, image in enumerate(frames, 1):
+    image.save(root / 'stills' / f'frame_{number:06}.jpg')
+document = ET.parse(root / 'photos/annotations.xml')
+document.find('image').set('name', 'frame_000001.jpg')
+document.find('meta/task/size').text = str(len(frames))
+document.write(root / 'stills/annotations.xml', encoding='utf-8', xml_declaration=True)

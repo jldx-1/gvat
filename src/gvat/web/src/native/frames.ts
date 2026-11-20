@@ -19,7 +19,7 @@ export function activateFrame(frame: number, playing = false): void {
     desiredChunk = chunk;
     if (!continuous) generation++;
     for (const [number, request] of pending) {
-        if (continuous ? number < chunk || number > chunk + lookahead() : number !== chunk) request.controller.abort();
+        if (!continuous || number < chunk || number > chunk + lookahead()) request.controller.abort();
     }
     activation = api('chunks/activate', { view: session.view, chunk, generation }, 'POST');
     // A cached frame may need no network read. Keep activation failures handled

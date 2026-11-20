@@ -173,8 +173,11 @@ class Workspace:
         self.lock = threading.RLock()
         if not self.data.is_dir() or not self.labels.is_dir():
             raise WorkspaceError("Data and labels must be directories")
-        load_classes(self.class_file)
+        self._load_classes()
         self.scan()
+
+    def _load_classes(self):
+        return load_classes(self.class_file)
 
     def scan(self) -> list[str]:
         images = sorted(
@@ -204,7 +207,7 @@ class Workspace:
 
     def manifest(self) -> dict:
         with self.lock:
-            classes, revision = load_classes(self.class_file)
+            classes, revision = self._load_classes()
             images = [{"path": name, "labeled": self.paths(name)[1].is_file()} for name in self.scan()]
             return {
                 "name": self.data.name, "data_path": str(self.data), "labels_path": str(self.labels),
@@ -219,7 +222,7 @@ class Workspace:
             image_bytes = source.read_bytes()
             with Image.open(io.BytesIO(image_bytes)) as opened:
                 width, height = opened.size
-            classes, classes_revision = load_classes(self.class_file)
+            classes, classes_revision = self._load_classes()
             raw = read_optional(target)
             return {
                 "path": image, "label_path": target.relative_to(self.labels).as_posix(),
@@ -245,7 +248,7 @@ class Workspace:
     def save(self, image: str, payload: dict) -> dict:
         with self.lock:
             source, target = self.paths(image)
-            classes, classes_revision = load_classes(self.class_file)
+            classes, classes_revision = self._load_classes()
             raw = read_optional(target)
             if digest(raw) != payload.get("revision"):
                 raise Conflict("Labels changed on disk. Reload before saving; your edits have been kept in the browser.")

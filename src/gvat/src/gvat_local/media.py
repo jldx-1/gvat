@@ -15,7 +15,7 @@ from pathlib import Path
 import imageio_ffmpeg
 from PIL import Image, UnidentifiedImageError
 
-from .workspace import image_extensions, Conflict, Workspace, WorkspaceError, atomic_write, contained, digest, load_classes, read_optional
+from .workspace import image_extensions, Conflict, Workspace, WorkspaceError, atomic_write, contained, digest, read_optional
 from .source_cache import SourceCache, cache_root, source_cache_session
 
 # These extensions only improve errors for broken media. They never limit discovery:
@@ -63,21 +63,21 @@ def file_digest(path: Path) -> str:
 
 def source_files(root: Path, excluded: tuple[Path, ...] = (), recursive: bool = True) -> list[Path]:
     excluded = tuple(path.resolve() for path in excluded)
-    if not recursive:
-        with os.scandir(root) as entries:
-            return sorted(Path(entry.path) for entry in entries if not entry.name.startswith('.')
-                          and entry.is_file() and Path(entry.path) not in excluded
-                          and (not entry.is_symlink() or Path(entry.path).resolve().is_relative_to(root)))
     files = []
-    for directory, children, names in os.walk(root, followlinks=False):
-        directory = Path(directory)
-        children[:] = [name for name in children if not name.startswith(".") and (directory / name).resolve() not in excluded]
-        if not recursive:
-            children.clear()
-        for name in names:
-            path = directory / name
-            if not name.startswith(".") and path not in excluded and path.is_file() and path.resolve().is_relative_to(root):
-                files.append(path)
+    directories = [root]
+    while directories:
+        with os.scandir(directories.pop()) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.name.startswith('.') or path in excluded:
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if recursive:
+                        directories.append(path)
+                elif entry.is_file() and (not entry.is_symlink() or path.resolve().is_relative_to(root)):
+                    # DirEntry reuses directory metadata. Resolve only symlinks;
+                    # resolving every image's parents makes large folders slow.
+                    files.append(path)
     return sorted(files)
 
 
@@ -386,7 +386,7 @@ class MediaWorkspace(Workspace):
     def manifest(self) -> dict:
         with self.lock:
             self._check_sources()
-            classes, revision = load_classes(self.class_file)
+            classes, revision = self._load_classes()
             existing = {path.relative_to(self.labels).as_posix() for path in self.labels.rglob("*.txt") if path.is_file()}
             return {
                 "name": self.source_root.name, "data_path": str(self.source_root), "labels_path": str(self.labels),

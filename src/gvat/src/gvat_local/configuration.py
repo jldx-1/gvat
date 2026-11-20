@@ -34,6 +34,8 @@ def load_config(path=None):
                         raise ValueError(f'Unknown config setting: {section}.{key}')
                     defaults[section][key] = value
         player, buffering = defaults['player'], defaults['buffer']
+        if defaults['import']['xml_version'] not in ('auto', '1.0', '1.1'):
+            raise ValueError('import.xml_version must be auto, "1.0" or "1.1" (quote version numbers)')
         if defaults['media']['preferred_type'] not in ('images', 'video', 'all'):
             raise ValueError('media.preferred_type must be images, video or all')
         if type(player['step']) is not int or not 1 <= player['step'] <= 10000:

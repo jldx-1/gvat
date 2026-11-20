@@ -99,6 +99,40 @@ class SSHTests(unittest.TestCase):
         self.assertTrue(output.is_file())
         self.assertNotIn('Open http', result.stdout)
 
+    def test_nested_remote_images_cache_and_save_reviews_in_sample_root(self):
+        nested = self.data / 'images/camera'
+        nested.mkdir(parents=True)
+        Image.new('RGB', (64, 48), 'blue').save(nested / 'two.png')
+        document = ET.parse(self.data / 'annotations.xml')
+        document.find('image').set('name', 'camera/two.png')
+        document.write(self.data / 'annotations.xml', encoding='utf-8')
+        args = self.arguments()
+        with input_locations(args) as remote, redirect_stdout(io.StringIO()):
+            workspace = prepare(args)
+            remote.bind(workspace)
+            native = NativeSession(workspace)
+            self.addCleanup(native.chunks.close)
+            self.addCleanup(native.exports.close)
+            boot = native.snapshot()
+            frame = boot['frames'].index('images/camera/two.png')
+            native.issue('POST', None, {'frame': frame, 'position': [1, 2, 20, 30], 'message': 'Nested image'})
+            reads = self.server.reads.get('/sample/images/camera/two.png', 0)
+        args = self.arguments('--mode=review')
+        with input_locations(args) as remote, redirect_stdout(io.StringIO()):
+            workspace = prepare(args)
+            remote.bind(workspace)
+            native = NativeSession(workspace)
+            self.addCleanup(native.chunks.close)
+            self.addCleanup(native.exports.close)
+            self.assertEqual(native.snapshot()['issues'][0]['comments'][0]['message'], 'Nested image')
+            self.assertEqual(self.server.reads.get('/sample/images/camera/two.png', 0), reads)
+            (nested / 'two.png').write_bytes(b'changed')
+            with self.assertRaises(Conflict):
+                remote.check_sources(force=True)
+        self.assertTrue((self.data / 'reviews.json').is_file())
+        self.assertFalse((nested / 'reviews.json').exists())
+
+
     def test_missing_xml_uses_remote_shared_labels_and_checks_media_changes(self):
         (self.data / 'annotations.xml').unlink()
         args = self.arguments('--yes')

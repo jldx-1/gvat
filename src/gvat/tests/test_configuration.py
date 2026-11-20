@@ -24,12 +24,14 @@ class ConfigurationTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_defaults_and_user_overrides_reach_cli_and_cli_flags_win(self):
-        self.custom.write_text('media:\n  preferred_type: video\nplayer:\n  step: 3\n  pixelated: true\nexport:\n  labels_format: "YOLO 1.1"\nbuffer:\n  seconds: 20\n  max_memory: "2GiB"\n')
+        self.custom.write_text('import:\n  xml_version: "1.0"\nmedia:\n  preferred_type: video\nplayer:\n  step: 3\n  pixelated: true\nexport:\n  labels_format: "YOLO 1.1"\nbuffer:\n  seconds: 20\n  max_memory: "2GiB"\n')
         settings = load_config(self.custom)
         args = parser(settings).parse_args([])
         self.assertEqual((args.step, args.pixelated, args.buffer_seconds, args.buffer_memory), (3, True, 20, 2 * 1024 ** 3))
         self.assertEqual(settings['export']['labels_format'], 'YOLO 1.1')
         self.assertEqual(args.media_type, 'video')
+        self.assertEqual(args.xml_version, '1.0')
+        self.assertEqual(parser(settings).parse_args(['--xml-version=auto']).xml_version, 'auto')
         args = parser(settings).parse_args(['--media-type=images', '--step=7', '--smooth-images', '--buffer-seconds=2', '--buffer-memory=512MiB'])
         self.assertEqual(args.media_type, 'images')
         self.assertEqual((args.step, args.pixelated, args.buffer_seconds, args.buffer_memory), (7, False, 2, 512 * 1024 ** 2))
@@ -37,7 +39,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_invalid_defaults_fail_with_actionable_error(self):
         for text in ('player:\n  step: 0', 'player:\n  pixelated: sometimes', 'export:\n  labels_format: unknown',
-                     'buffer:\n  seconds: .nan', 'buffer:\n  max_memory: -3GiB', 'media:\n  preferred_type: unknown', 'unknown: {}'):
+                     'buffer:\n  seconds: .nan', 'buffer:\n  max_memory: -3GiB', 'media:\n  preferred_type: unknown',
+                     'import:\n  xml_version: 1.1', 'import:\n  xml_version: "2.0"', 'unknown: {}'):
             self.custom.write_text(text)
             with self.subTest(text=text), self.assertRaises(WorkspaceError):
                 load_config(self.custom)

@@ -24,9 +24,10 @@ def parser(settings=None):
     result.set_defaults(settings=settings)
     result.add_argument('--config', type=Path, help='Use a particular config.yml instead of the user defaults')
     result.add_argument('--version', action='version', version=f'gvat {__version__}')
-    result.add_argument('--data_path', '--data-path', type=location, help='Flat sample folder, local or ssh://[user@]host[:port]/path')
+    result.add_argument('--data_path', '--data-path', type=location, help='Sample folder including nested media, local or ssh://[user@]host[:port]/path')
     result.add_argument('--labels', '--classes', type=location, help='Local/SSH shared labels.txt; used to initialize missing XML')
     result.add_argument('--annotations', '--xml', type=location, help='CVAT XML file (default: discover the single XML in DATA_PATH, or create annotations.xml)')
+    result.add_argument('--xml-version', choices=('auto', '1.0', '1.1'), default=settings['import']['xml_version'], help='CVAT annotation format version to read (auto reads the XML version tag)')
     result.add_argument('--class-names', help='Comma-separated class names for initializing missing XML')
     result.add_argument('--mode', choices=('auto', 'annotate', 'review'), default='auto')
     result.add_argument('--media-type', choices=('images', 'video', 'all'), default=settings['media']['preferred_type'], help='Preferred source type in mixed folders (existing XML selects its matching media)')
@@ -51,5 +52,5 @@ def parser(settings=None):
 def help_parser():
     # These values are used only to render help. Actual launches always load
     # the shipped/user config; help remains usable even if that file is broken.
-    return parser({'media': {'preferred_type': 'images'}, 'player': {'step': 10, 'pixelated': False},
+    return parser({'import': {'xml_version': 'auto'}, 'media': {'preferred_type': 'images'}, 'player': {'step': 10, 'pixelated': False},
                    'buffer': {'seconds': 15, 'max_memory': None}, 'export': {}})

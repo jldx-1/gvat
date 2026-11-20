@@ -38,6 +38,8 @@ The first install copies the root [config.yml](config.yml) to
 preserve your settings. Edit that file to set your defaults:
 
 ```yaml
+import:
+  xml_version: auto
 media:
   preferred_type: images
 player:
@@ -56,7 +58,7 @@ Set `pixelated: true` for sharp pixels, or use a format name such as
 `max_memory: "4GiB"` sets a smaller memory limit; `null` uses the automatic RAM
 cap. Restart GVAT after changing the file. `--config="./config.yml"` selects a
 different config, and `GVAT_CONFIG` can select its path for installation and use.
-CLI flags such as `--step=5`, `--pixelated`, `--smooth-images`,
+CLI flags such as `--xml-version=1.0`, `--step=5`, `--pixelated`, `--smooth-images`,
 `--buffer-seconds=30`, and `--buffer-memory=4GiB` override the file.
 
 `media.preferred_type` chooses `images`, `video`, or `all` in folders containing
@@ -88,9 +90,30 @@ contains one class name per line and initializes class definitions for new XML.
   `GIF`, `PPM`, `TIFF`, and more. Animated images and multi-page `TIFF` files
   open as individual frames/pages.
 
-Support follows the installed decoders. Media is detected by content. Only files
-directly in the selected folder are read. If no supported images or video are
-found, GVAT prints an error and does not start or create XML.
+Support follows the installed decoders. Media is detected by content in the
+selected folder and its subfolders, including an extracted CVAT `images/` folder.
+Hidden files/folders and directory symlinks are skipped. Files outside the sample
+are not followed. If no supported images or video are found, GVAT prints an error
+and does not start or create XML.
+
+GVAT reads CVAT annotation XML `1.0` and `1.1` for images and video tracks.
+The default `import.xml_version: auto` reads the `<annotations><version>` tag.
+These are annotation format versions, separate from the CVAT application version
+and the `<?xml version="1.0"?>` declaration. See the
+[CVAT XML specification](https://docs.cvat.ai/docs/dataset_management/formats/format-cvat/#format-specifications).
+To require a version, set `import.xml_version: "1.0"` or `"1.1"` in your config,
+or override it for one command:
+
+```bash
+gvat --data_path="./example" --mode=annotate --xml-version=1.0
+```
+
+An explicit version also reads files missing the version tag; the tag is added
+when you save an annotation edit. A conflicting declared version or unsupported
+version produces an error without changing the file. Existing XML keeps its
+format version when saved; newly created XML uses `1.1`. The import setting
+applies to existing files, so use `auto` to reopen a newly created `1.1` file.
+Export format selection is independent of the import setting.
 
 **Annotate:**
 
@@ -126,6 +149,12 @@ Video buffering targets **15 seconds** of decoded frames and can use several
 GiB when available. It reserves half of currently available RAM for other work.
 Use `--buffer-seconds=30` to change the target or `--buffer-memory=4GiB` to set a
 smaller upper memory limit.
+
+The buffer fills forward while playing **and while paused**, starting immediately
+and refilling after each seek. It uses the configured duration/RAM budget for the
+current chunk and following chunks, stopping at the end of the sample. Scrubbing
+cancels obsolete requests so the new position takes priority. A larger duration
+can buffer farther ahead when RAM permits; a budget of one chunk has no lookahead.
 
 Startup reads image headers and checks the first image; additional image pixels
 are validated as their chunks are requested. It avoids decoding and hashing an
@@ -174,9 +203,28 @@ example/
 The shared `labels.txt` stays outside `example/`. The XML and `AVI` source video
 are together inside the flat annotation folder.
 
-Media and XML stay together in a flat folder. Previews and runtime caches live
-outside that folder. Source media stays unchanged, and stale saves are rejected
-if files change on disk. Git works independently.
+Images can instead live in nested folders, with XML and reviews in the parent:
+
+```text
+labels.txt
+example/
+  annotations.xml
+  reviews.json
+  images/
+    camera-01/
+      frame_000001.png
+      frame_000002.png
+```
+
+Pass the parent folder as `--data_path="./example"`. XML image names can be full
+sample-relative paths such as `images/camera-01/frame_000001.png`, or the paths
+inside CVAT's exported `images/` directory. Shorter names must match uniquely;
+duplicate names in different folders require full relative paths in the XML.
+New image entries use sample-relative paths. Existing image names are preserved.
+`annotations.xml` and `reviews.json` stay in the parent; shared labels stay outside.
+
+Previews and runtime caches live outside the sample. Source media stays unchanged,
+and stale saves are rejected if files change on disk. Git works independently.
 
 SSH sample locations work with annotation, review, and CLI exports:
 
@@ -194,8 +242,9 @@ Shared labels may be local or remote; a remote parent's `labels.txt` is discover
 automatically. With multiple XML files, use `--annotations="annotations.xml"`
 or a matching SSH XML URL.
 
-GVAT caches the flat remote folder's regular files locally before opening it,
-then reuses media whose remote size and modification time are unchanged. Allow
+GVAT caches the remote folder's regular files, including nested image folders,
+locally before opening it, then reuses media whose remote size and modification
+time are unchanged. Allow
 enough local disk space for the source media. XML and `reviews.json` saves go
 back to the SSH folder immediately, with revision checks and atomic SFTP
 replacement. The remote server needs SFTP, write permission, and OpenSSH-style

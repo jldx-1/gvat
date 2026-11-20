@@ -61,5 +61,5 @@ def buffer_plan(workspace, frames, chunk_size):
     budget = min(wanted, cap)
     chunks = max(1, min(math.ceil(target_frames / chunk_size), budget // (bytes_per_frame * chunk_size)))
     return {'seconds': seconds, 'fps': fps, 'max_bytes': budget, 'max_chunks': chunks,
-            'prefetch_chunks': max(1, chunks // 2), 'available_bytes': available,
+            'prefetch_chunks': max(0, chunks - 1), 'available_bytes': available,
             'target_bytes': wanted, 'capped': budget < wanted}

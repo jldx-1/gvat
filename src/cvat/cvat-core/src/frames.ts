@@ -29,6 +29,8 @@ const frameDataCache: Record<string, {
     prefetchAnalyzer: PrefetchAnalyzer;
     decodedBlocksCacheSize: number;
     activeChunkRequest: Promise<void> | null;
+    localPrefetchFrame?: number;
+    localPrefetchRunning?: boolean;
     activeContextRequest: Promise<Record<number, ImageBitmap>> | null;
     segmentFrameNumbers: number[];
     contextCache: Record<number, {
@@ -455,6 +457,52 @@ class PrefetchAnalyzer {
     }
 }
 
+// GVAT keeps the native decoder/cache full ahead of the selected frame, even
+// while paused. Serialize background decoding with foreground requests and
+// re-read the anchor after every await so seeking always takes priority.
+async function prefetchLocalFrames(jobID: number): Promise<void> {
+    const cache = frameDataCache[jobID];
+    if (process.env.GVAT_LOCAL !== '1' || !config.localFrameBuffer || !cache || cache.localPrefetchRunning) return;
+    cache.localPrefetchRunning = true;
+    try {
+        while (frameDataCache[jobID] === cache) {
+            if (cache.activeChunkRequest) {
+                await cache.activeChunkRequest;
+                continue;
+            }
+            const meta = await cache.getMeta();
+            if (frameDataCache[jobID] !== cache) return;
+            if (cache.activeChunkRequest) continue;
+            const anchor = cache.localPrefetchFrame;
+            if (typeof anchor !== 'number' || !cache.provider.frame(anchor)) return;
+            const current = meta.getFrameChunkIndex(meta.getDataFrameNumber(anchor - cache.jobStartFrame));
+            const end = Math.min(meta.chunkCount - 1, current + cache.decodedBlocksCacheSize - 1);
+            let next = current + 1;
+            while (next <= end && cache.provider.isChunkCached(next)) next++;
+            if (next > end) return;
+            let failed = false;
+            const request = cache.getChunk(next, ChunkQuality.COMPRESSED).then((chunk) => new Promise<void>((resolve) => {
+                if (frameDataCache[jobID] !== cache || cache.localPrefetchFrame !== anchor) {
+                    resolve();
+                    return;
+                }
+                cache.provider.requestDecodeBlock(
+                    chunk, next,
+                    cache.segmentFrameNumbers.slice(next * cache.chunkSize, (next + 1) * cache.chunkSize),
+                    () => {}, resolve, () => { failed = true; resolve(); },
+                );
+            })).catch(() => { failed = true; });
+            cache.activeChunkRequest = request;
+            await request;
+            if (cache.activeChunkRequest === request) cache.activeChunkRequest = null;
+            // Retry on a new seek, but never spin on a broken source/network.
+            if (failed && cache.localPrefetchFrame === anchor) return;
+        }
+    } finally {
+        cache.localPrefetchRunning = false;
+    }
+}
+
 Object.defineProperty(FrameData.prototype.data, 'implementation', {
     async value(this: FrameData, onServerRequest) {
         const {
@@ -462,8 +510,11 @@ Object.defineProperty(FrameData.prototype.data, 'implementation', {
             decodeForward, forwardStep, decodedBlocksCacheSize, segmentFrameNumbers,
         } = frameDataCache[this.jobID];
         const meta = await frameDataCache[this.jobID].getMeta();
+        if (process.env.GVAT_LOCAL === '1' && config.localFrameBuffer) {
+            frameDataCache[this.jobID].localPrefetchFrame = this.number;
+        }
 
-        return new Promise<{
+        const request = new Promise<{
             renderWidth: number;
             renderHeight: number;
             imageData: ImageBitmap | Blob;
@@ -495,6 +546,7 @@ Object.defineProperty(FrameData.prototype.data, 'implementation', {
 
             if (frame) {
                 if (
+                    !(process.env.GVAT_LOCAL === '1' && config.localFrameBuffer) &&
                     prefetchAnalyzer.shouldPrefetchNext(
                         this.number,
                         decodeForward,
@@ -641,14 +693,21 @@ Object.defineProperty(FrameData.prototype.data, 'implementation', {
                                     },
                                 );
                         } catch (error) {
+                            frameDataCache[this.jobID].activeChunkRequest = null;
+                            resolveLoadAndDecode();
                             reject(error);
                         }
                     }).catch((error) => {
+                        frameDataCache[this.jobID].activeChunkRequest = null;
                         reject(error);
                         resolveLoadAndDecode(error);
                     });
                 });
             });
+        });
+        return request.then((result) => {
+            void prefetchLocalFrames(this.jobID).catch(() => {});
+            return result;
         });
     },
     writable: false,

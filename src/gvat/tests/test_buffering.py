@@ -16,6 +16,7 @@ class BufferingTests(unittest.TestCase):
             plan = buffer_plan(self.workspace(), frames, 1)
         self.assertEqual(plan['max_bytes'], 3840 * 2160 * 4 * 30 * 15)
         self.assertEqual(plan['max_chunks'], 450)
+        self.assertEqual(plan['prefetch_chunks'], 449)
         self.assertFalse(plan['capped'])
 
     def test_buffer_reserves_half_available_ram_and_honors_a_smaller_cap(self):
@@ -33,3 +34,10 @@ class BufferingTests(unittest.TestCase):
         for value in ('0', '-1GiB', 'lots', 'NaN'):
             with self.assertRaises(ValueError):
                 memory_size(value)
+
+    def test_small_budget_does_not_prefetch_beyond_cache_capacity(self):
+        workspace = self.workspace()
+        workspace.buffer_memory = 64 * 48 * 4 * 32
+        with patch('gvat_local.buffering.available_memory', return_value=1024 ** 3):
+            plan = buffer_plan(workspace, [{'width': 64, 'height': 48}] * 100, 32)
+        self.assertEqual((plan['max_chunks'], plan['prefetch_chunks']), (1, 0))

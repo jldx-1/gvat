@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image
 
-from .media import MediaWorkspace, ffmpeg_input, source_revision, video_index
+from .media import MediaWorkspace, ffmpeg_input, source_files, source_revision, video_index
 from .workspace import Conflict, WorkspaceError, atomic_write, contained, digest, same_boxes, validate_box
 
 
@@ -63,33 +63,64 @@ def serialize_xml(root: ET.Element) -> bytes:
     ) + b"\n"
 
 
-def annotation_media_type(path, data):
+def image_name_index(keys):
+    """CVAT ZIP exports omit the outer images/ directory from image names."""
+    keys = set(keys)
+    suffixes = {}
+    for key in keys:
+        parts = PurePosixPath(key).parts
+        for start in range(1, len(parts)):
+            suffixes.setdefault('/'.join(parts[start:]), []).append(key)
+    return keys, suffixes
+
+
+def resolve_image_name(name, index, subset=''):
+    relative = PurePosixPath(name)
+    if not name or relative.is_absolute() or '..' in relative.parts or '\\' in name:
+        raise WorkspaceError('CVAT XML image names must be relative POSIX media paths')
+    if subset and (PurePosixPath(subset).is_absolute() or '..' in PurePosixPath(subset).parts or '\\' in subset):
+        raise WorkspaceError('CVAT XML subset must be a relative POSIX path')
+    keys, suffixes = index
+    for candidate in ([f'{subset}/{name}', name] if subset else [name]):
+        if candidate in keys:
+            return candidate
+        matches = suffixes.get(candidate, [])
+        if len(matches) > 1:
+            raise WorkspaceError(f'Ambiguous CVAT XML image name: {name}. Use its full path relative to the sample folder.')
+        if matches:
+            return matches[0]
+    return None
+
+
+def annotation_media_type(path, data, xml_version='auto'):
     """Preserve an existing XML's media binding when a folder also has exports."""
-    document = CvatDocument(path.read_bytes(), native=True)
+    document = CvatDocument(path.read_bytes(), native=True, xml_version=xml_version)
     if document.root.findall('track') or document.root.findtext('meta/task/mode') == 'interpolation':
         return 'video'
     kinds = set()
     from .media import probe_media
 
+    files = source_files(data, (path, data / 'reviews.json', data / 'labels.txt'))
+    names = image_name_index(file.relative_to(data).as_posix() for file in files)
     for image in document.root.findall('image'):
         relative = PurePosixPath(image.get('name', ''))
-        if not relative.parts or relative.is_absolute() or '..' in relative.parts or '\\' in str(relative):
-            raise WorkspaceError('CVAT XML image names must be relative POSIX media paths')
-        if len(relative.parts) == 1 and (data / str(relative)).is_file():
+        if resolve_image_name(image.get('name', ''), names, image.get('subset', '')):
             kinds.add('images')
         elif len(relative.parts) > 1:
-            source = contained(data, relative.parts[0])
-            if source.is_file():
-                candidate = probe_media(source)
-                if candidate:
-                    kinds.add('images' if candidate.kind == 'image' else 'video')
+            for end in range(len(relative.parts) - 1, 0, -1):
+                source = contained(data, '/'.join(relative.parts[:end]))
+                if source.is_file():
+                    candidate = probe_media(source)
+                    if candidate:
+                        kinds.add('images' if candidate.kind == 'image' else 'video')
+                    break
         elif re.fullmatch(r'frame_\d+\.[^.]+', str(relative)):
             kinds.add('video')
     return 'all' if len(kinds) > 1 else next(iter(kinds), None)
 
 
 class CvatDocument:
-    def __init__(self, raw: bytes, native: bool = False):
+    def __init__(self, raw: bytes, native: bool = False, xml_version: str = 'auto'):
         self.native = native
         try:
             text = raw.decode("utf-8-sig")
@@ -98,9 +129,24 @@ class CvatDocument:
             self.root = ET.fromstring(text, parser=ET.XMLParser(target=ET.TreeBuilder(insert_comments=True)))
         except (ET.ParseError, UnicodeError) as error:
             raise WorkspaceError(f"Invalid UTF-8 CVAT XML: {error}") from error
-        if self.root.tag != "annotations" or self.root.findtext("version") not in ("1.0", "1.1"):
-            raise WorkspaceError("Expected a CVAT XML <annotations> export, version 1.0 or 1.1")
-        self.version = self.root.findtext("version")
+        if self.root.tag != 'annotations':
+            raise WorkspaceError('Expected a CVAT XML <annotations> export')
+        if xml_version not in ('auto', '1.0', '1.1'):
+            raise WorkspaceError('CVAT XML import version must be auto, 1.0 or 1.1')
+        declared = self.root.findtext('version', '').strip()
+        if declared and declared not in ('1.0', '1.1'):
+            raise WorkspaceError(f'Unsupported CVAT XML version {declared!r}; supported versions: 1.0, 1.1')
+        if xml_version != 'auto' and declared and declared != xml_version:
+            raise WorkspaceError(f'CVAT XML declares version {declared}, but import requires {xml_version}. Use --xml-version=auto or update import.xml_version.')
+        if not declared and xml_version == 'auto':
+            raise WorkspaceError('CVAT XML version tag is missing. Set --xml-version=1.0 or --xml-version=1.1 (or import.xml_version in config).')
+        self.version = declared or xml_version
+        if not declared:
+            version = self.root.find('version')
+            if version is None:
+                version = ET.Element('version')
+                self.root.insert(0, version)
+            version.text = self.version  # Persist only when annotations are saved.
         definitions = self.root.findall("./meta/task/labels/label") or self.root.findall("./meta/project/labels/label")
         names = [element.findtext("name", "").strip() for element in definitions]
         if not names or any(not name for name in names) or len(set(names)) != len(names):
@@ -200,18 +246,14 @@ class CvatDocument:
 
     def bind(self, workspace: MediaWorkspace) -> None:
         keys = set(workspace._frames)
+        names = image_name_index(key for key, (source, _) in workspace._frames.items() if source.kind == 'image')
         self.image_indices = {key: index for index, key in enumerate(sorted(keys))}
         if len(workspace.sources) == 1 and len(workspace.videos) == 1:
             self.video_images = {key: number for key, (_, number) in workspace._frames.items()}
         seen_ids = set()
         for image in self.root.findall("image"):
             name = image.get("name", "")
-            relative = PurePosixPath(name)
-            if not name or relative.is_absolute() or ".." in relative.parts or "\\" in name:
-                raise WorkspaceError("CVAT XML image names must be relative POSIX media paths")
-            subset = image.get("subset", "")
-            subset_key = f"{subset}/{name}"
-            key = subset_key if subset and subset_key in keys else name
+            key = resolve_image_name(name, names, image.get('subset', '')) or name
             if key not in keys:
                 # CVAT for images names video frames frame_000000.png (zero-based).
                 match = re.fullmatch(r"frame_(\d+)\.[^.]+", name)
@@ -408,21 +450,26 @@ class CvatDocument:
 
 
 class CvatXmlWorkspace(MediaWorkspace):
-    def __init__(self, data: Path, xml: Path, native_ui: bool = False, **kwargs):
+    def __init__(self, data: Path, xml: Path, native_ui: bool = False, xml_version: str = 'auto', **kwargs):
         self.native_ui = native_ui
+        self.xml_version = xml_version
         self.xml_file = xml.resolve(strict=True)
-        kwargs.setdefault("recursive", False)
+        kwargs.setdefault("recursive", True)
         super().__init__(data, self.xml_file.parent, self.xml_file, **kwargs)
         self.document()  # Validate every imported box/path before opening the editor.
 
     def _annotation_key(self, key: str) -> str:
         return key
 
+    def _load_classes(self):
+        document = CvatDocument(self.xml_file.read_bytes(), native=self.native_ui, xml_version=self.xml_version)
+        return document.classes, document.classes_revision
+
     def document(self) -> CvatDocument:
         remote = getattr(self, 'remote', None)
         if remote:
             remote.refresh_file(self.xml_file)
-        document = CvatDocument(self.xml_file.read_bytes(), native=self.native_ui)
+        document = CvatDocument(self.xml_file.read_bytes(), native=self.native_ui, xml_version=self.xml_version)
         document.bind(self)
         return document
 

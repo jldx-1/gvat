@@ -1,7 +1,7 @@
 # GVAT source guide
 
 GVAT provides a Linux entry point to CVAT's actual annotation page. The command
-reads a flat media folder and CVAT XML directly. One shared `labels.txt` can
+reads a media folder (including nested images) and CVAT XML directly. One shared `labels.txt` can
 initialize class definitions for new XML. Review feedback persists in a portable
 `reviews.json` beside the sample's media.
 
@@ -41,10 +41,11 @@ Options:
 - `GVAT_BASHRC`: choose the Bash profile to update.
 - `./uninstall.sh --purge-cache`: also remove downloaded Node tools and media caches.
 
-## Flat folders and XML
+## Media folders and XML
 
-`--data_path` selects one flat folder. Pillow and FFmpeg identify files by content.
-Only files directly in that folder are indexed. Image-only, video-only, and mixed
+`--data_path` selects a sample folder. Pillow and FFmpeg identify files by content.
+Media in subfolders is also indexed. Hidden paths and directory symlinks are skipped;
+file symlinks must remain inside the sample. Image-only, video-only, and mixed
 media are supported. Animated images and multi-page images expose native frames.
 `media.preferred_type` in the root config, or `--media-type`, chooses `images`,
 `video`, or `all`. Images are preferred by default with fallback when absent.
@@ -80,7 +81,9 @@ mode. Explicit `annotate` and `review` modes avoid that choice.
 CVAT's own annotation models handle drawing, interpolation, grouping, labeling,
 attributes, and undo/redo. The local adapter translates their serialized collection
 to CVAT XML. Boxes, polygons, polylines, points, ellipses, and tags are supported.
-Image names must match the selected files. Track frame numbers retain their
+Image names match full sample-relative paths or unique suffixes, including paths
+inside the `images/` wrapper of extracted CVAT exports. Ambiguous suffixes are
+rejected. XML and review files remain in the sample root. Track frame numbers retain their
 original zero-based source indices, including task frame filters. The native
 frame player and object editing semantics are unchanged.
 
@@ -88,6 +91,11 @@ New XML follows CVAT 1.1, including task details, timestamps, labels, segments,
 owner fields, and dump time. Video XML includes `original_size`; image entries
 include dimensions and lexical image IDs. CVAT 1.0 imports without dimensions
 read their dimensions from the matching source media.
+`import.xml_version: auto` reads the annotation version tag. Quoted `"1.0"` or
+`"1.1"`, or `--xml-version`, requires that version and supplies a missing tag.
+Declared mismatches and unsupported versions fail without modifying XML. A missing
+tag is added to the in-memory document and persisted on an actual annotation save.
+New XML always uses 1.1; import configuration applies to existing files only.
 
 New XML for one video uses tracks; other new XML uses image entries. Video shapes
 are written as single-frame tracks, matching CVAT's video export format. Native
@@ -137,7 +145,11 @@ Chunk sizes target at most 32 MiB of decoded pixels, up to 32 frames. The decode
 cache targets 15 seconds of native video frames, rounded to whole chunks, and
 uses at most half of available RAM (including a container memory limit). It can
 span several GiB; `--buffer-seconds` changes the duration and `--buffer-memory`
-sets a smaller upper limit. At least one frame/chunk is retained. The separate
+sets a smaller upper limit. GVAT continuously fills the native decoder/cache while
+paused as well as playing, using the current chunk plus up to `max_chunks - 1`
+forward chunks. Each background decode rechecks the selected frame, yields to
+foreground decoding, and stops at the budget or end of the sample. At least one
+frame/chunk is retained; a single-chunk budget has no lookahead. The separate
 server transfer cache retains at most 64 MiB/eight chunks. Video decoding runs
 outside the annotation lock.
 
@@ -214,12 +226,13 @@ Local/SSH shared class lists are supported. Remote XML can be selected by its
 filename in the remote sample or by a URL using the same endpoint.
 
 Each remote sample has a locked cache under `$XDG_CACHE_HOME/gvat/ssh`. Regular
-files in its flat directory are cached before opening. Unchanged media is reused
+files in its directory and nested folders are cached before opening. Hidden paths
+and symlinks are skipped. Unchanged media is reused
 by remote size/mtime. XML and review metadata refresh from the server; mutations
 check revisions and use `posix-rename` atomic replacement. Changed remote media
 requires a restart. No source media is written back. `--purge-cache` removes the
 local SSH cache, preserving the authoritative remote files.
-Remote source validation uses one SFTP directory listing rather than a request
+Remote source validation uses one SFTP listing per source directory rather than a request
 for each image.
 
 ## Development
@@ -234,7 +247,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Tests cover XML persistence, native frames, media decoding, flat-folder discovery,
+Tests cover versioned XML persistence, native frames, media decoding, nested-folder discovery,
 conflicts, persistent native review, real loopback SSH/SFTP transfers, config
 defaults, headless exports, Bash aliases, isolated installation cleanup, and
 canvas interactions. They do not uninstall the working checkout or edit the real

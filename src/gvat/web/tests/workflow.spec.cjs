@@ -342,25 +342,28 @@ test.describe('Native video chunk buffering', () => {
             if (request.url().includes('/api/cvat/chunks?')) chunks.push(request.url());
             if (request.url().includes('/api/image?')) singles.push(request.url());
         });
+        let delayed = false;
+        let releaseDelayed;
+        const gate = new Promise((resolve) => { releaseDelayed = resolve; });
+        await page.route('**/api/cvat/chunks?**', async (route) => {
+            const chunk = Number(new URL(route.request().url()).searchParams.get('chunk'));
+            if (chunk === 2 && !delayed) {
+                delayed = true;
+                await gate;
+            }
+            await route.continue().catch(() => {});
+        });
         const bootstrap = page.waitForResponse((response) => response.url().endsWith('/api/cvat/session'));
         await open(page, session);
         const boot = await (await bootstrap).json();
         expect(boot.meta.chunk_size).toBeGreaterThan(1);
         const input = page.locator('.cvat-player-frame-selector input');
-        let delayed = false;
-        await page.route('**/api/cvat/chunks?**', async (route) => {
-            const chunk = Number(new URL(route.request().url()).searchParams.get('chunk'));
-            if (chunk === 2 && !delayed) {
-                delayed = true;
-                await new Promise((resolve) => setTimeout(resolve, 700));
-            }
-            await route.continue().catch(() => {});
-        });
         await input.fill(String(boot.meta.chunk_size * 2));
         await input.press('Enter');
         await expect.poll(() => delayed).toBe(true);
         await input.fill('80');
         await input.press('Enter');
+        releaseDelayed();
         await expect(page.locator('.cvat-player-filename-wrapper')).toHaveText('source.mp4/frame_000081.png');
         await page.waitForTimeout(800);
         await expect(input).toHaveValue('80');
@@ -378,6 +381,72 @@ test.describe('Native video chunk buffering', () => {
         expect(errors).toEqual([]);
         expect(session.errors()).not.toMatch(/BrokenPipeError|ConnectionResetError|Traceback/);
         expect(snapshot(session.data)).toEqual(before);
+    });
+});
+
+for (const mediaType of ['videos', 'stills']) test.describe(`Paused forward buffering: ${mediaType}`, () => {
+    test.use({ mediaType, videoFrames: 192, mode: 'review', configuration: `buffer:\n  seconds: ${mediaType === 'videos' ? 25 : 2}\n` });
+    test('fills the decoded forward budget without navigating and resumes after a paused seek', async ({ page, session }) => {
+        const completed = new Set();
+        const requested = [];
+        page.on('requestfinished', (request) => {
+            if (request.url().includes('/api/cvat/chunks?')) completed.add(Number(new URL(request.url()).searchParams.get('chunk')));
+        });
+        page.on('request', (request) => {
+            if (request.url().includes('/api/cvat/chunks?')) requested.push(Number(new URL(request.url()).searchParams.get('chunk')));
+        });
+        const bootstrap = page.waitForResponse((response) => response.url().endsWith('/api/cvat/session'));
+        await open(page, session);
+        const boot = await (await bootstrap).json();
+        expect(boot.buffer.max_chunks).toBeGreaterThan(2);
+        expect(boot.buffer.prefetch_chunks).toBe(boot.buffer.max_chunks - 1);
+        const input = page.locator('.cvat-player-frame-selector input');
+        for (const anchor of [0, 128]) {
+            if (anchor) { await input.fill(String(anchor)); await input.press('Enter'); }
+            await expect(input).toHaveValue(String(anchor));
+            await expect(page.locator('.cvat-player-play-button')).toBeVisible();
+            const target = Math.floor(anchor / boot.meta.chunk_size) + boot.buffer.prefetch_chunks;
+            await expect.poll(() => completed.has(target), { timeout: 15000 }).toBe(true);
+            // Navigating to this chunk must use decoded frames already in CVAT,
+            // even if its transport is now unavailable. Later lookahead may continue.
+            let attempted = 0;
+            const pattern = `**/api/cvat/chunks?**chunk=${target}&**`;
+            await page.route(pattern, (route) => { attempted++; return route.abort(); });
+            const before = requested.filter((chunk) => chunk === target).length;
+            const original = await page.locator('#cvat_canvas_background').evaluate((canvas) => canvas.toDataURL());
+            const frame = target * boot.meta.chunk_size;
+            await input.fill(String(frame));
+            await input.press('Enter');
+            const filename = mediaType === 'videos' ? `source.mp4/frame_${String(frame + 1).padStart(6, '0')}.png` : `frame_${String(frame + 1).padStart(6, '0')}.jpg`;
+            await expect(page.locator('.cvat-player-filename-wrapper')).toHaveText(filename);
+            await expect.poll(() => page.locator('#cvat_canvas_background').evaluate((canvas) => canvas.toDataURL())).not.toBe(original);
+            expect(attempted).toBe(0);
+            expect(requested.filter((chunk) => chunk === target).length).toBe(before);
+            await page.unroute(pattern);
+        }
+        await expect(page.locator('.ant-notification-notice-error')).toHaveCount(0);
+        expect(session.errors()).not.toMatch(/BrokenPipeError|Traceback/);
+    });
+});
+
+test.describe('Nested CVAT image export', () => {
+    test.use({ mediaType: 'nested' });
+    test('annotates nested images and reopens the saved XML', async ({ page, session }) => {
+        await open(page, session);
+        await expect(page.locator('.cvat-player-filename-wrapper')).toHaveText('images/camera/one.jpg');
+        const original = fs.readFileSync(path.join(session.data, 'images/camera/two.png'));
+        await page.locator('.cvat-player-next-button').click();
+        await expect(page.locator('.cvat-player-filename-wrapper')).toHaveText('images/camera/two.png');
+        await draw(page, 'rectangle', [[.2, .2], [.5, .5]]);
+        await save(page);
+        expect(fs.readFileSync(session.xml, 'utf8')).toContain('name="images/camera/two.png"');
+        expect(fs.readFileSync(path.join(session.data, 'images/camera/two.png'))).toEqual(original);
+        expect(fs.readdirSync(path.join(session.data, 'images/camera')).sort()).toEqual(['one.jpg', 'two.png']);
+        await session.restart();
+        await open(page, session);
+        await page.locator('.cvat-player-next-button').click();
+        await expect(page.locator('#cvat_canvas_shape_2')).toBeVisible();
+        expect(session.errors()).not.toMatch(/Traceback/);
     });
 });
 

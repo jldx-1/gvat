@@ -166,19 +166,29 @@ class SSHMirror:
             else:
                 atomic_write(local, raw, digest(current))
 
+    def _files(self, relative=''):
+        """Walk regular remote files without following symlinks or hidden dirs."""
+        for entry in self.sftp.listdir_attr(posixpath.join(self.remote_root, relative)):
+            name = entry.filename
+            if name.startswith('.'):
+                continue
+            if name != posixpath.basename(name) or '\\' in name:
+                raise WorkspaceError('Invalid SSH sample filename')
+            key = posixpath.join(relative, name)
+            if stat.S_ISDIR(entry.st_mode):
+                yield from self._files(key)
+            elif stat.S_ISREG(entry.st_mode):
+                yield key, entry
+
     def download(self):
         with self.lock:
             present = set()
             self.inventory = {}
-            for entry in self.sftp.listdir_attr(self.remote_root):
-                name = entry.filename
-                if name.startswith('.') or not stat.S_ISREG(entry.st_mode):
-                    continue
-                if name != Path(name).name or '\\' in name:
-                    raise WorkspaceError('Invalid SSH sample filename')
+            for name, entry in self._files():
                 present.add(name)
                 self.inventory[name] = signature(entry)
                 remote, local = posixpath.join(self.remote_root, name), self.sample / name
+                local.parent.mkdir(parents=True, exist_ok=True)
                 self.paths[local] = remote
                 if name.lower().endswith('.xml') or name == 'reviews.json':
                     self.refresh_file(local)
@@ -195,8 +205,8 @@ class SSHMirror:
                         Path(staging).unlink(missing_ok=True)
                     self.manifest[name] = list(signature(entry))
             # This directory contains only files owned by this cache, never user data.
-            for local in self.sample.iterdir():
-                if local.is_file() and local.name not in present:
+            for local in self.sample.rglob('*'):
+                if local.is_file() and local.relative_to(self.sample).as_posix() not in present:
                     local.unlink()
             atomic_write(self.manifest_file, json.dumps(self.manifest).encode(), digest(read_optional(self.manifest_file)))
 
@@ -220,7 +230,7 @@ class SSHMirror:
 
     def bind(self, workspace):
         self.paths.setdefault(workspace.xml_file, posixpath.join(self.remote_root, workspace.xml_file.name))
-        self.sources = {source.path.name: self.inventory[source.path.name] for source in workspace.sources}
+        self.sources = {source.name: self.inventory[source.name] for source in workspace.sources}
         self.check_sources(force=True)
         workspace.remote = self
         # A newly created XML is published before the browser opens.
@@ -232,7 +242,12 @@ class SSHMirror:
         with self.lock:
             if not force and time.monotonic() - self.last_source_check < 1:
                 return
-            actual = {entry.filename: signature(entry) for entry in self.sftp.listdir_attr(self.remote_root) if stat.S_ISREG(entry.st_mode)}
+            actual = {}
+            # One listing per source directory, rather than a round trip per image.
+            for directory in {posixpath.dirname(name) for name in self.sources}:
+                actual.update((posixpath.join(directory, entry.filename), signature(entry))
+                              for entry in self.sftp.listdir_attr(posixpath.join(self.remote_root, directory))
+                              if stat.S_ISREG(entry.st_mode))
             for name, expected in self.sources.items():
                 if actual.get(name) != expected:
                     raise Conflict('SSH source media changed. Restart GVAT before continuing.')

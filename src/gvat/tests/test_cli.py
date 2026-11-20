@@ -100,16 +100,20 @@ class CLITests(unittest.TestCase):
         self.assertEqual(list(self.root.rglob("*.txt")), [labels])
         self.assertFalse(any(path.is_dir() for path in (self.root / "images").iterdir()))
 
-    def test_nested_media_is_not_loaded_from_a_flat_sample(self):
+    def test_nested_media_is_loaded_and_xml_stays_in_parent_folder(self):
         (self.root / "images/source.mp4").unlink()
         (self.root / "images/one.png").unlink()
         nested = self.root / "images/nested"
         nested.mkdir()
-        Image.new("RGB", (20, 20)).save(nested / "hidden.png")
-        result = subprocess.run(self.command("--data_path", "images", "--class-names", "cat", "--yes"), cwd=self.root, env=self.environment, input="", capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("No supported images or videos", result.stderr)
-        self.assertFalse((self.root / "images/annotations.xml").exists())
+        Image.new("RGB", (20, 20)).save(nested / "one.png")
+        with patch.dict(os.environ, self.environment), patch('sys.stdout', new_callable=io.StringIO):
+            workspace = prepare(parser().parse_args(['--data_path', str(self.root / 'images'), '--class-names=cat', '--yes']))
+        self.assertEqual(list(workspace._frames), ['nested/one.png'])
+        self.assertEqual(workspace.xml_file, self.root / 'images/annotations.xml')
+        frame = workspace.frame('nested/one.png')
+        workspace.save('nested/one.png', {**frame, 'annotations': [{'class_id': 0, 'cx': .5, 'cy': .5, 'width': .5, 'height': .5}]})
+        self.assertEqual(workspace.document().root.find('image').get('name'), 'nested/one.png')
+        self.assertEqual(sorted(path.name for path in nested.iterdir()), ['one.png'])
 
     def test_multiple_xml_files_need_an_explicit_choice(self):
         data = self.root / "images"

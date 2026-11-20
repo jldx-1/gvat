@@ -235,13 +235,18 @@ class ExportJob:
         self._check_revision()
         result = self.root / 'annotations.zip'
         if self.exact_xml:
+            document = self.workspace.document()
             with zipfile.ZipFile(result, 'w', zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr('annotations.xml', self.saved_xml)
                 if self.save_images:
                     for key in self.view['keys']:
                         source, page = self.workspace._frames[key]
                         file = source.path if source.kind == 'image' and source.frames == 1 else self.workspace._ensure_frame(key)
-                        archive.write(file, 'images/' + key)
+                        image = document.images.get(key)
+                        # Match the unchanged XML's paths, even when the source
+                        # came from an extracted images/ wrapper directory.
+                        name = '/'.join(filter(None, (image.get('subset', ''), image.get('name')))) if image is not None else key
+                        archive.write(file, 'images/' + name)
             self._check_revision()
             return result
         if self.received != len(self.view['keys']):

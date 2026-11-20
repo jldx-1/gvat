@@ -23,6 +23,8 @@ without media. The export modal hides remote storage and request-dashboard links
 The local host supplies configured defaults to the existing player settings and
 export modal; no replacement player or annotation tools are introduced.
 A guarded core frame-cache policy accepts the host's RAM-capped buffer budget.
+The same guarded path fills the native decoded cache forward while paused or
+playing, rechecks the selected frame between chunks, and gives seeks priority.
 The local entry
 point and transport live under `src/gvat/`; no replacement annotation screen is
 maintained. Media previews and XML persistence are provided by the local Python

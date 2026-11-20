@@ -107,11 +107,11 @@ def prepare(args: argparse.Namespace) -> CvatXmlWorkspace:
 
     preferred = args.media_type
     if preferred != 'all' and selected.is_file():
-        preferred = annotation_media_type(selected, data) or preferred
+        preferred = annotation_media_type(selected, data, args.xml_version) or preferred
     excluded = [selected, data / 'reviews.json', data / 'labels.txt']
     if args.labels:
         excluded.append(args.labels.expanduser().resolve())
-    candidates = discover_media(data, tuple(excluded), recursive=False, preferred=preferred)
+    candidates = discover_media(data, tuple(excluded), recursive=True, preferred=preferred)
     if candidates[0].kind == 'image':
         candidates[0] = validate_image(candidates[0])
     created = False
@@ -125,7 +125,8 @@ def prepare(args: argparse.Namespace) -> CvatXmlWorkspace:
             selected = Path(answer).expanduser().resolve()
             if selected.suffix.lower() != ".xml" or selected.is_dir():
                 raise WorkspaceError("Select a CVAT .xml file")
-    workspace = CvatXmlWorkspace(data, selected, candidates=candidates, native_ui=True)
+    workspace = CvatXmlWorkspace(data, selected, candidates=candidates, native_ui=True,
+                                 xml_version='auto' if created else args.xml_version)
     kinds = {candidate.kind for candidate in candidates}
     workspace.preferred_media = 'all' if len(kinds) > 1 else 'images' if kinds == {'image'} else 'video'
     if not created and (args.labels or args.class_names) and not getattr(args, '_discovered_labels', False):
