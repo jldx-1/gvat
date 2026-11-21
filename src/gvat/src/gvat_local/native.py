@@ -146,6 +146,7 @@ class NativeSession:
             largest_frame = max(frame["width"] * frame["height"] * 4 for frame in frames)
             chunk_size = min(32, max(1, (32 * 1024 * 1024) // largest_frame))
             buffering = buffer_plan(workspace, frames, chunk_size)
+            chunk_size = buffering['chunk_size']
             self.views[view_id] = {"revision": digest(document.raw), "keys": keys, "numbers": native_numbers, "step": step,
                                    "labels": labels, "specs": specs, "nodes": nodes, "frames": frames, "shape_tracks": {}, "chunk_size": chunk_size, "buffer": buffering}
             while len(self.views) > 16:

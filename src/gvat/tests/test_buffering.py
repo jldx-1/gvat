@@ -41,3 +41,27 @@ class BufferingTests(unittest.TestCase):
         with patch('gvat_local.buffering.available_memory', return_value=1024 ** 3):
             plan = buffer_plan(workspace, [{'width': 64, 'height': 48}] * 100, 32)
         self.assertEqual((plan['max_chunks'], plan['prefetch_chunks']), (1, 0))
+
+    def test_chunk_size_shrinks_to_the_memory_cap(self):
+        workspace = self.workspace()
+        frame_bytes = 800 * 600 * 4
+        frames = [{'width': 800, 'height': 600}] * 100
+        for cap in (frame_bytes // 2, frame_bytes * 2, frame_bytes * 17):
+            workspace.buffer_memory = cap
+            with self.subTest(cap=cap), patch('gvat_local.buffering.available_memory', return_value=1024 ** 3):
+                plan = buffer_plan(workspace, frames, 17)
+            self.assertGreaterEqual(plan['chunk_size'], 1)
+            decoded_bytes = frame_bytes * plan['chunk_size'] * plan['max_chunks']
+            self.assertLessEqual(decoded_bytes, plan['max_bytes'])
+            self.assertLessEqual(decoded_bytes, max(frame_bytes, cap))
+
+    def test_low_available_ram_and_short_samples_also_limit_the_chunk_size(self):
+        workspace = self.workspace()
+        frames = [{'width': 800, 'height': 600}] * 100
+        frame_bytes = 800 * 600 * 4
+        with patch('gvat_local.buffering.available_memory', return_value=frame_bytes * 4):
+            plan = buffer_plan(workspace, frames, 17)
+        self.assertEqual((plan['chunk_size'], plan['max_chunks']), (2, 1))
+        with patch('gvat_local.buffering.available_memory', return_value=1024 ** 3):
+            plan = buffer_plan(workspace, frames[:1], 17)
+        self.assertEqual((plan['chunk_size'], plan['max_chunks'], plan['max_bytes']), (1, 1, frame_bytes))

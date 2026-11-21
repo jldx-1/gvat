@@ -243,6 +243,7 @@ From the repository root after installation:
 .venv-gvat/bin/python -m unittest discover -s src/gvat/tests -v
 cd src/gvat/web
 npm run build
+npm run test:memory
 npx playwright install chromium
 npm run test:e2e
 ```
@@ -253,6 +254,9 @@ defaults, headless exports, Bash aliases, isolated installation cleanup, and
 canvas interactions. They do not uninstall the working checkout or edit the real
 Bash profile. The lower-level YOLO parser remains an internal validation utility;
 the CLI uses CVAT XML.
+Memory checks count live bitmap resources across repeated decodes, errors,
+cancellation, and out-of-order completion. Browser stress tests also verify that
+small configured budgets shrink chunks and close evicted bitmaps.
 
 Optional recipes are in `src/justfile`. Upstream source and its MIT license are
 preserved in `src/cvat/`. See [UPSTREAM.md](UPSTREAM.md) and the

@@ -25,6 +25,9 @@ export modal; no replacement player or annotation tools are introduced.
 A guarded core frame-cache policy accepts the host's RAM-capped buffer budget.
 The same guarded path fills the native decoded cache forward while paused or
 playing, rechecks the selected frame between chunks, and gives seeks priority.
+Frame decoder fixes release partial bitmaps on failure/close, settle superseded
+requests, and detach completed worker callbacks. The ZIP worker transfers bitmap
+ownership and decodes sequentially to avoid duplicate pixel storage.
 The local entry
 point and transport live under `src/gvat/`; no replacement annotation screen is
 maintained. Media previews and XML persistence are provided by the local Python

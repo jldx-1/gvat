@@ -155,6 +155,10 @@ and refilling after each seek. It uses the configured duration/RAM budget for th
 current chunk and following chunks, stopping at the end of the sample. Scrubbing
 cancels obsolete requests so the new position takes priority. A larger duration
 can buffer farther ahead when RAM permits; a budget of one chunk has no lookahead.
+Chunks shrink to fit smaller memory limits, with one full-resolution frame as
+the minimum. The limit covers decoded frame storage; the canvas, encoded media,
+annotations, and exports also use memory. Evicted, failed, and cancelled decodes
+release their image bitmaps.
 
 Startup reads image headers and checks the first image; additional image pixels
 are validated as their chunks are requested. It avoids decoding and hashing an

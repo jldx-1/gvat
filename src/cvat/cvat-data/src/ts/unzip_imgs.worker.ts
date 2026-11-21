@@ -5,58 +5,30 @@
 
 import JSZip from 'jszip';
 
-onmessage = (e) => {
-    let errored = false;
-    function handleError(error): void {
-        try {
-            if (!errored) {
-                postMessage({ error });
-            }
-        } finally {
-            errored = true;
-        }
-    }
-
+onmessage = async (event) => {
     try {
-        const zip = new JSZip();
-        if (e.data) {
-            const {
-                start, end, block, dimension, dimension2D,
-            } = e.data;
-
-            zip.loadAsync(block).then((_zip) => {
-                let index = start;
-
-                _zip.forEach((relativePath) => {
-                    const fileIndex = index++;
-                    if (fileIndex <= end) {
-                        _zip.file(relativePath)
-                            .async('blob')
-                            .then((fileData) => {
-                                if (!errored) {
-                                    // do not need to read the rest of block if an error already occurred
-                                    if (dimension === dimension2D) {
-                                        createImageBitmap(fileData).then((img) => {
-                                            postMessage({
-                                                fileName: relativePath,
-                                                index: fileIndex,
-                                                data: img,
-                                            });
-                                        });
-                                    } else {
-                                        postMessage({
-                                            fileName: relativePath,
-                                            index: fileIndex,
-                                            data: fileData,
-                                        });
-                                    }
-                                }
-                            }).catch(handleError);
-                    }
-                });
-            }).catch(handleError);
+        const { start, end, block, dimension, dimension2D } = event.data;
+        const zip = await JSZip.loadAsync(block);
+        const files = Object.values(zip.files).filter((file) => !file.dir);
+        if (end >= files.length) throw new Error('Image chunk contains too few frames');
+        // Decode one frame at a time and transfer ownership. Cloning bitmaps
+        // leaves another full decoded frame in the worker until garbage collection.
+        for (let index = start; index <= end; index++) {
+            const file = files[index];
+            const blob = await file.async('blob');
+            if (dimension === dimension2D) {
+                const bitmap = await createImageBitmap(blob);
+                try {
+                    postMessage({ fileName: file.name, index, data: bitmap }, [bitmap]);
+                } catch (error) {
+                    bitmap.close();
+                    throw error;
+                }
+            } else {
+                postMessage({ fileName: file.name, index, data: blob });
+            }
         }
     } catch (error) {
-        handleError(error);
+        postMessage({ error });
     }
 };

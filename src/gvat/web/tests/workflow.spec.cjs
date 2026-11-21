@@ -450,6 +450,73 @@ test.describe('Nested CVAT image export', () => {
     });
 });
 
+test.describe('Decoded memory cap', () => {
+    test.use({ mediaType: 'stills', videoFrames: 96, mode: 'review', configuration: 'buffer:\n  max_memory: 4MiB\n' });
+    test('repeated seeks close old bitmaps and keep whole chunks within the configured budget', async ({ page, session }) => {
+        await page.addInitScript(() => {
+            const owned = new WeakMap();
+            const stats = { bytes: 0, peak: 0, received: 0, closed: 0 };
+            window.gvatMemoryStats = stats;
+            const close = ImageBitmap.prototype.close;
+            ImageBitmap.prototype.close = function () {
+                const bytes = owned.get(this);
+                if (bytes !== undefined) { owned.delete(this); stats.bytes -= bytes; stats.closed++; }
+                return close.call(this);
+            };
+            const NativeWorker = window.Worker;
+            window.Worker = class extends NativeWorker {
+                constructor(...args) {
+                    super(...args);
+                    this.addEventListener('message', (event) => {
+                        const bitmap = event.data?.data;
+                        if (bitmap instanceof ImageBitmap && !owned.has(bitmap)) {
+                            const bytes = bitmap.width * bitmap.height * 4;
+                            owned.set(bitmap, bytes); stats.bytes += bytes; stats.received++;
+                            stats.peak = Math.max(stats.peak, stats.bytes);
+                        }
+                    });
+                }
+            };
+        });
+        const bootstrap = page.waitForResponse((response) => response.url().endsWith('/api/cvat/session'));
+        await open(page, session);
+        const boot = await (await bootstrap).json();
+        expect(boot.meta.chunk_size).toBe(2);
+        expect(boot.buffer.max_chunks).toBe(1);
+        const input = page.locator('.cvat-player-frame-selector input');
+        for (let frame = 4; frame < 96; frame += 4) {
+            const before = await page.locator('#cvat_canvas_background').evaluate((canvas) => canvas.toDataURL());
+            await input.fill(String(frame)); await input.press('Enter');
+            await expect(page.locator('.cvat-player-filename-wrapper')).toHaveText(`frame_${String(frame + 1).padStart(6, '0')}.jpg`);
+            await expect.poll(() => page.locator('#cvat_canvas_background').evaluate((canvas) => canvas.toDataURL())).not.toBe(before);
+        }
+        const stats = await page.evaluate(() => window.gvatMemoryStats);
+        expect(stats.received).toBeGreaterThan(40);
+        expect(stats.closed).toBeGreaterThanOrEqual(stats.received - boot.meta.chunk_size);
+        expect(stats.peak).toBeLessThanOrEqual(boot.buffer.max_bytes);
+        await expect(page.locator('.ant-notification-notice-error')).toHaveCount(0);
+        expect(session.errors()).not.toMatch(/Traceback/);
+    });
+});
+
+test('slow revision polling keeps at most one request in flight', async ({ page, session }) => {
+    let requests = 0;
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    await page.route('**/api/cvat/revision', async (route) => {
+        requests++;
+        await gate;
+        await route.continue().catch(() => {});
+    });
+    try {
+        await open(page, session);
+        await expect.poll(() => requests, { timeout: 7000 }).toBe(1);
+        // Keep the response pending across two more four-second polling ticks.
+        await page.waitForTimeout(8500);
+        expect(requests).toBe(1);
+    } finally { release(); }
+});
+
 test.describe('Configured native CVAT defaults', () => {
     test.use({ configuration: 'player:\n  step: 2\n  pixelated: true\nexport:\n  dataset_format: "COCO 1.0"\n  labels_format: "YOLO 1.1"\nbuffer:\n  seconds: 8\n  max_memory: 64MiB\n' });
     test('applies display, player, buffer and separate export format defaults', async ({ page, session }) => {

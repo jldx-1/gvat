@@ -27,55 +27,80 @@ export enum DimensionType {
 export function decodeContextImages(
     block: any, start: number, end: number,
 ): Promise<Record<string, ImageBitmap>> {
-    const decodeZipWorker = (decodeContextImages as any).zipWorker || new Worker(
-        new URL('./unzip_imgs.worker', import.meta.url),
-    );
-    (decodeContextImages as any).zipWorker = decodeZipWorker;
+    if (end <= start) return Promise.resolve({});
     return new Promise((resolve, reject) => {
         decodeContextImages.mutex.acquire().then((release) => {
+            const owner = decodeContextImages as any;
+            let worker: Worker;
+            try {
+                worker = owner.zipWorker || new Worker(new URL('./unzip_imgs.worker', import.meta.url));
+            } catch (error) {
+                release();
+                reject(error);
+                return;
+            }
+            owner.zipWorker = worker;
             const result: Record<string, ImageBitmap> = {};
             let decoded = 0;
-
-            decodeZipWorker.onerror = (event: ErrorEvent) => {
+            let settled = false;
+            const finish = (error?: Error): void => {
+                if (settled) return;
+                settled = true;
+                worker.onmessage = discardDecodedMessage;
+                worker.onerror = null;
+                if (error) {
+                    for (const bitmap of Object.values(result)) bitmap.close();
+                    worker.terminate();
+                    if (owner.zipWorker === worker) owner.zipWorker = null;
+                }
                 release();
-                reject(event.error);
+                if (error) reject(error);
+                else resolve(result);
             };
-
-            decodeZipWorker.onmessage = async (event) => {
-                if (event.data.error) {
-                    this.zipWorker.onerror(new ErrorEvent('error', {
-                        error: event.data.error,
-                    }));
+            worker.onerror = (event) => finish(event.error || new Error(event.message));
+            worker.onmessage = (event) => {
+                if (settled) {
+                    discardDecodedMessage(event);
                     return;
                 }
-
-                const { data, fileName } = event.data;
-                result[fileName.split('.')[0]] = data;
-                decoded++;
-
-                if (decoded === end) {
-                    release();
-                    resolve(result);
+                if (event.data.error) {
+                    finish(event.data.error instanceof Error ? event.data.error : new Error(String(event.data.error)));
+                    return;
                 }
+                const { data, fileName } = event.data;
+                const key = fileName.split('.')[0];
+                if (key in result) {
+                    data.close();
+                    finish(new Error('Duplicate context image name'));
+                    return;
+                }
+                result[key] = data;
+                decoded++;
+                if (decoded === end - start) finish();
             };
-
-            decodeZipWorker.postMessage({
-                block,
-                start,
-                end,
-                dimension: DimensionType.DIMENSION_2D,
-                dimension2D: DimensionType.DIMENSION_2D,
-            });
-        });
+            try {
+                // The context API's end is exclusive; chunk workers use inclusive end.
+                worker.postMessage({
+                    block, start, end: end - 1,
+                    dimension: DimensionType.DIMENSION_2D, dimension2D: DimensionType.DIMENSION_2D,
+                });
+            } catch (error) {
+                finish(error instanceof Error ? error : new Error(String(error)));
+            }
+        }).catch(reject);
     });
 }
 
 decodeContextImages.mutex = new Mutex();
 
+function discardDecodedMessage(event: MessageEvent): void {
+    if (event.data?.data instanceof ImageBitmap) event.data.data.close();
+}
+
 interface BlockToDecode {
     chunkFrameNumbers: number[];
     chunkIndex: number;
-    block: ArrayBuffer;
+    block: ArrayBuffer | null;
     onDecodeAll(): void;
     onDecode(frame: number, bitmap: ImageBitmap | Blob): void;
     onReject(e: Error): void;
@@ -101,6 +126,9 @@ export class FrameDecoder {
     private zipWorker: Worker | null;
     private videoWorker: Worker | null;
     private getChunkIndex: (frame: number) => number;
+    private closed = false;
+    private cancelDecode: (() => void) | null = null;
+    private decodeScheduled = false;
 
     constructor(
         blockType: BlockType,
@@ -183,41 +211,36 @@ export class FrameDecoder {
         onReject: (e: Error) => void,
     ): void {
         this.validateFrameNumbers(chunkFrameNumbers);
-
-        if (this.requestedChunkToDecode !== null) {
-            // a chunk was already requested to be decoded, but decoding didn't start yet
-            if (chunkIndex === this.requestedChunkToDecode.chunkIndex) {
-                // it was the same chunk
+        if (this.closed) {
+            onReject(new RequestOutdatedError());
+            return;
+        }
+        if (this.chunkIsBeingDecoded?.chunkIndex === chunkIndex) {
+            if (this.requestedChunkToDecode) {
                 this.requestedChunkToDecode.onReject(new RequestOutdatedError());
-
-                this.requestedChunkToDecode.onDecode = onDecode;
-                this.requestedChunkToDecode.onReject = onReject;
-            } else if (this.requestedChunkToDecode.onReject) {
-                // it was other chunk
-                this.requestedChunkToDecode.onReject(new RequestOutdatedError());
+                this.requestedChunkToDecode.block = null;
+                this.requestedChunkToDecode = null;
             }
-        } else if (this.chunkIsBeingDecoded === null ||
-            chunkIndex !== this.chunkIsBeingDecoded.chunkIndex
-        ) {
-            // everything was decoded or decoding other chunk is in process
-            this.requestedChunkToDecode = {
-                chunkFrameNumbers,
-                chunkIndex,
-                block,
-                onDecode,
-                onDecodeAll,
-                onReject,
-            };
-        } else {
-            // the same chunk is being decoded right now
-            // reject previous decoding request
             this.chunkIsBeingDecoded.onReject(new RequestOutdatedError());
-
             this.chunkIsBeingDecoded.onReject = onReject;
             this.chunkIsBeingDecoded.onDecode = onDecode;
+            this.chunkIsBeingDecoded.onDecodeAll = onDecodeAll;
+            return;
         }
 
-        this.startDecode();
+        if (this.requestedChunkToDecode !== null) {
+            // Only one waiter owns the mutex queue. Replace its payload instead
+            // of retaining a compressed block and waiter for every scrub event.
+            this.requestedChunkToDecode.onReject(new RequestOutdatedError());
+            this.requestedChunkToDecode.block = null;
+            this.requestedChunkToDecode = { chunkFrameNumbers, chunkIndex, block, onDecode, onDecodeAll, onReject };
+            return;
+        }
+        this.requestedChunkToDecode = { chunkFrameNumbers, chunkIndex, block, onDecode, onDecodeAll, onReject };
+        if (!this.decodeScheduled) {
+            this.decodeScheduled = true;
+            void this.startDecode();
+        }
     }
 
     setRenderSize(width: number, height: number): void {
@@ -265,167 +288,162 @@ export class FrameDecoder {
     }
 
     async startDecode(): Promise<void> {
-        const blockToDecode = { ...this.requestedChunkToDecode };
         const releaseMutex = await this.mutex.acquire();
-        const release = (): void => {
+        this.decodeScheduled = false;
+        if (this.closed || !this.requestedChunkToDecode) {
+            releaseMutex();
+            return;
+        }
+        const request = this.requestedChunkToDecode;
+        const { chunkFrameNumbers, chunkIndex } = request;
+        this.requestedChunkToDecode = null;
+        this.chunkIsBeingDecoded = request;
+        const decodedFrames: Record<number, ImageBitmap | Blob> = {};
+        let settled = false;
+        let decodedCount = 0;
+
+        const finish = (error?: Error): void => {
+            if (settled) return;
+            settled = true;
+            request.block = null;
+            this.cancelDecode = null;
+            this.chunkIsBeingDecoded = null;
+            if (this.zipWorker) {
+                // Do not retain the completed chunk and its callbacks in the
+                // persistent worker. Close any late transferred bitmap.
+                this.zipWorker.onmessage = discardDecodedMessage;
+                this.zipWorker.onerror = null;
+                if (error) {
+                    this.zipWorker.terminate();
+                    this.zipWorker = null;
+                }
+            }
             if (this.videoWorker) {
                 this.videoWorker.terminate();
                 this.videoWorker = null;
             }
-
-            releaseMutex();
-        };
-        try {
-            const { chunkFrameNumbers, chunkIndex, block } = this.requestedChunkToDecode;
-            if (chunkIndex !== blockToDecode.chunkIndex) {
-                // request is not relevant, another block was already requested
-                // it happens when A is being decoded, B comes and wait for mutex, C comes and wait for mutex
-                // B is not necessary anymore, because C already was requested
-                blockToDecode.onReject(new RequestOutdatedError());
-                throw new RequestOutdatedError();
-            }
-
-            const getFrameNumber = (chunkFrameIndex: number): number => (
-                chunkFrameNumbers[chunkFrameIndex]
-            );
-
-            this.orderedStack = [chunkIndex, ...this.orderedStack];
-            this.cleanup();
-            const decodedFrames: Record<number, ImageBitmap | Blob> = {};
-            this.chunkIsBeingDecoded = this.requestedChunkToDecode;
-            this.requestedChunkToDecode = null;
-
-            if (this.blockType === BlockType.MP4VIDEO) {
-                this.videoWorker = new Worker(
-                    new URL('./3rdparty/Decoder.worker', import.meta.url),
-                );
-                let index = 0;
-
-                this.videoWorker.onmessage = (e) => {
-                    if (e.data.consoleLog) {
-                        // ignore initialization message
-                        return;
-                    }
-                    const keptIndex = index;
-                    const frameNumber = getFrameNumber(keptIndex);
-
-                    // do not use e.data.height and e.data.width because they might be not correct
-                    // instead, try to understand real height and width of decoded image via scale factor
-                    const scaleFactor = Math.ceil(this.renderHeight / e.data.height);
-                    const height = Math.round(this.renderHeight / scaleFactor);
-                    const width = Math.round(this.renderWidth / scaleFactor);
-
-                    createImageBitmap(FrameDecoder.cropImage(
-                        e.data.buf,
-                        e.data.width,
-                        e.data.height,
-                        width,
-                        height,
-                    )).then((bitmap) => {
-                        decodedFrames[frameNumber] = bitmap;
-                        this.chunkIsBeingDecoded.onDecode(frameNumber, decodedFrames[frameNumber]);
-
-                        if (keptIndex === chunkFrameNumbers.length - 1) {
-                            this.decodedChunks[chunkIndex] = decodedFrames;
-                            this.chunkIsBeingDecoded.onDecodeAll();
-                            this.chunkIsBeingDecoded = null;
-                            release();
-                        }
-                    });
-
-                    index++;
-                };
-
-                this.videoWorker.onerror = (event: ErrorEvent) => {
-                    release();
-                    this.chunkIsBeingDecoded.onReject(event.error);
-                    this.chunkIsBeingDecoded = null;
-                };
-
-                this.videoWorker.postMessage({
-                    type: 'Broadway.js - Worker init',
-                    options: {
-                        rgb: true,
-                        reuseMemory: false,
-                    },
-                });
-
-                const reader = new MP4Reader(new Bytestream(block));
-                reader.read();
-                const video = reader.tracks[1];
-
-                const avc = reader.tracks[1].trak.mdia.minf.stbl.stsd.avc1.avcC;
-                const sps = avc.sps[0];
-                const pps = avc.pps[0];
-
-                this.videoWorker.postMessage({ buf: sps, offset: 0, length: sps.length });
-                this.videoWorker.postMessage({ buf: pps, offset: 0, length: pps.length });
-
-                for (let sample = 0; sample < video.getSampleCount(); sample++) {
-                    video.getSampleNALUnits(sample).forEach((nal) => {
-                        this.videoWorker.postMessage({ buf: nal, offset: 0, length: nal.length });
-                    });
+            if (error) {
+                for (const data of Object.values(decodedFrames)) {
+                    if (data instanceof ImageBitmap) data.close();
                 }
             } else {
-                this.zipWorker = this.zipWorker || new Worker(
-                    new URL('./unzip_imgs.worker', import.meta.url),
-                );
-                let decodedCount = 0;
+                this.decodedChunks[chunkIndex] = decodedFrames;
+                this.orderedStack.unshift(chunkIndex);
+            }
+            releaseMutex();
+            if (error) request.onReject(error);
+            else request.onDecodeAll();
+        };
+        this.cancelDecode = () => finish(new RequestOutdatedError());
+        const accept = (index: number, data: ImageBitmap | Blob): void => {
+            if (settled || this.closed) {
+                if (data instanceof ImageBitmap) data.close();
+                return;
+            }
+            const frame = chunkFrameNumbers[index];
+            if (!Number.isInteger(index) || frame === undefined || frame in decodedFrames) {
+                if (data instanceof ImageBitmap) data.close();
+                finish(new Error('Unexpected or duplicate frame in decoded chunk'));
+                return;
+            }
+            decodedFrames[frame] = data;
+            try {
+                request.onDecode(frame, data);
+                decodedCount++;
+                // ImageBitmap promises may complete out of order.
+                if (decodedCount === chunkFrameNumbers.length) finish();
+            } catch (error) {
+                finish(error instanceof Error ? error : new Error(String(error)));
+            }
+        };
 
-                this.zipWorker.onmessage = async (event) => {
+        try {
+            // Replacing an already cached chunk must close its old bitmaps too.
+            if (chunkIndex in this.decodedChunks) {
+                for (const data of Object.values(this.decodedChunks[chunkIndex])) {
+                    if (data instanceof ImageBitmap) data.close();
+                }
+                delete this.decodedChunks[chunkIndex];
+                this.orderedStack = this.orderedStack.filter((index) => index !== chunkIndex);
+            }
+            this.cleanup(); // Reserve room for the entire in-progress chunk.
+            if (this.blockType === BlockType.MP4VIDEO) {
+                const worker = new Worker(new URL('./3rdparty/Decoder.worker', import.meta.url));
+                this.videoWorker = worker;
+                let index = 0;
+                worker.onmessage = (event) => {
+                    if (settled || event.data.consoleLog) return;
+                    const frameIndex = index++;
+                    const scaleFactor = Math.ceil(this.renderHeight / event.data.height);
+                    const height = Math.round(this.renderHeight / scaleFactor);
+                    const width = Math.round(this.renderWidth / scaleFactor);
+                    try {
+                        createImageBitmap(FrameDecoder.cropImage(
+                            event.data.buf, event.data.width, event.data.height, width, height,
+                        )).then((bitmap) => accept(frameIndex, bitmap)).catch((error) => finish(error));
+                    } catch (error) {
+                        finish(error instanceof Error ? error : new Error(String(error)));
+                    }
+                };
+                worker.onerror = (event) => finish(event.error || new Error(event.message));
+                worker.postMessage({
+                    type: 'Broadway.js - Worker init',
+                    options: { rgb: true, reuseMemory: false },
+                });
+                const reader = new MP4Reader(new Bytestream(request.block));
+                reader.read();
+                const video = reader.tracks[1];
+                const avc = video.trak.mdia.minf.stbl.stsd.avc1.avcC;
+                for (const nal of [avc.sps[0], avc.pps[0]]) {
+                    worker.postMessage({ buf: nal, offset: 0, length: nal.length });
+                }
+                for (let sample = 0; sample < video.getSampleCount(); sample++) {
+                    for (const nal of video.getSampleNALUnits(sample)) {
+                        worker.postMessage({ buf: nal, offset: 0, length: nal.length });
+                    }
+                }
+            } else {
+                const worker = this.zipWorker || new Worker(new URL('./unzip_imgs.worker', import.meta.url));
+                this.zipWorker = worker;
+                worker.onmessage = (event) => {
                     if (event.data.error) {
-                        this.zipWorker.onerror(new ErrorEvent('error', {
-                            error: event.data.error,
-                        }));
-                        return;
+                        finish(event.data.error instanceof Error ? event.data.error : new Error(String(event.data.error)));
+                    } else {
+                        accept(event.data.index, event.data.data);
                     }
-
-                    const frameNumber = getFrameNumber(event.data.index);
-                    decodedFrames[frameNumber] = event.data.data as ImageBitmap | Blob;
-                    this.chunkIsBeingDecoded.onDecode(frameNumber, decodedFrames[frameNumber]);
-
-                    if (decodedCount === chunkFrameNumbers.length - 1) {
-                        this.decodedChunks[chunkIndex] = decodedFrames;
-                        this.chunkIsBeingDecoded.onDecodeAll();
-                        this.chunkIsBeingDecoded = null;
-                        release();
-                    }
-
-                    decodedCount++;
                 };
-
-                this.zipWorker.onerror = (event: ErrorEvent) => {
-                    release();
-                    this.chunkIsBeingDecoded.onReject(event.error);
-                    this.chunkIsBeingDecoded = null;
-                };
-
-                this.zipWorker.postMessage({
-                    block,
-                    start: 0,
-                    end: chunkFrameNumbers.length - 1,
-                    dimension: this.dimension,
-                    dimension2D: DimensionType.DIMENSION_2D,
+                worker.onerror = (event) => finish(event.error || new Error(event.message));
+                worker.postMessage({
+                    block: request.block, start: 0, end: chunkFrameNumbers.length - 1,
+                    dimension: this.dimension, dimension2D: DimensionType.DIMENSION_2D,
                 });
             }
-        } catch (_error) {
-            this.chunkIsBeingDecoded = null;
-            release();
+            // postMessage has copied the encoded input; the decoder no longer owns it.
+            request.block = null;
+        } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
         }
     }
 
     public close(): void {
+        this.closed = true;
+        const pending = this.requestedChunkToDecode;
+        this.requestedChunkToDecode = null;
+        if (pending) pending.block = null;
+        this.cancelDecode?.();
         if (this.zipWorker) {
+            this.zipWorker.onmessage = discardDecodedMessage;
+            this.zipWorker.onerror = null;
             this.zipWorker.terminate();
             this.zipWorker = null;
         }
-
         if (this.videoWorker) {
             this.videoWorker.terminate();
             this.videoWorker = null;
         }
-
         this.cleanup(Number.MAX_SAFE_INTEGER);
+        this.orderedStack = [];
+        if (pending) pending.onReject(new RequestOutdatedError());
     }
 
     public cachedChunks(includeInProgress = false): number[] {

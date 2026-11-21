@@ -118,20 +118,24 @@ async function start(): Promise<void> {
         </MemoryRouter></ShortcutsContextProvider></Provider>,
     );
     await store.dispatch(changeFrameAsync(0, false) as any);
-    const shown = new Set<unknown>();
+    let shown = new Set<unknown>();
     store.subscribe(() => {
         const errors = store.getState().notifications.errors;
+        const current = new Set<unknown>();
         for (const group of Object.values(errors)) for (const value of Object.values(group || {})) {
+            if (value) current.add(value);
             if (value && !shown.has(value)) {
-                shown.add(value);
                 const failure = value as any;
                 notification.error({ message: failure.message || 'Annotation action failed', description: failure.reason?.message || String(failure.reason || '') });
             }
         }
+        shown = current;
     });
     document.title = 'GVAT';
+    let checkingRevision = false;
     setInterval(async () => {
-        if (document.hidden) return;
+        if (document.hidden || checkingRevision) return;
+        checkingRevision = true;
         try {
             const current = await api('revision');
             if (current.revision !== revision) notification.warning({
@@ -140,6 +144,8 @@ async function start(): Promise<void> {
             });
         } catch (error) {
             notification.warning({ key: 'local-xml-changed', message: (error as Error).message, duration: 0 });
+        } finally {
+            checkingRevision = false;
         }
     }, 4000);
 }

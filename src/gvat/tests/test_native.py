@@ -40,6 +40,27 @@ class NativeCVATTests(unittest.TestCase):
     def payload(self, snapshot):
         return {"view": snapshot["view"], "revision": snapshot["revision"], "annotations": copy.deepcopy(snapshot["annotations"])}
 
+    def test_small_memory_cap_reaches_chunk_metadata_and_transport(self):
+        for number in range(4):
+            Image.new('RGB', (64, 48), 'blue').save(self.data / f'extra-{number}.png')
+        workspace = CvatXmlWorkspace(self.data, self.xml, native_ui=True)
+        workspace.buffer_memory = 64 * 48 * 4 * 2
+        native = NativeSession(workspace)
+        self.addCleanup(native.chunks.close)
+        self.addCleanup(native.exports.close)
+        with patch('gvat_local.buffering.available_memory', return_value=1024 ** 3):
+            boot = native.snapshot()
+        self.assertEqual(boot['meta']['chunk_size'], 2)
+        self.assertEqual(boot['job']['data_chunk_size'], 2)
+        view = native.chunk_view(boot['view'])
+        self.assertEqual(view['chunk_size'], 2)
+        self.assertEqual(boot['buffer']['max_chunks'], 1)
+        native.chunks.activate(boot['view'], 0, 1, 0)
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(native.chunks.read(boot['view'], view['keys'], 2, 0, 1))) as chunk:
+            self.assertEqual(len(chunk.namelist()), 2)
+
     def test_real_cvat_serialization_round_trip_noop_and_revision_conflicts(self):
         original = self.xml.read_bytes()
         modified = self.xml.stat().st_mtime_ns

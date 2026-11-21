@@ -49,17 +49,19 @@ def buffer_plan(workspace, frames, chunk_size):
     fps = max(rates, default=25)
     seconds = getattr(workspace, 'buffer_seconds', 15)
     target_frames = min(len(frames), math.ceil(fps * seconds))
-    # Round to whole chunks so a 15-second target does not lose almost an
-    # entire chunk solely because its last few frames cross the boundary.
-    wanted = max(bytes_per_frame, min(len(frames), math.ceil(target_frames / chunk_size) * chunk_size) * bytes_per_frame)
     available = available_memory()
     # Leave half of free RAM for the browser, annotations, FFmpeg and other apps.
     cap = max(bytes_per_frame, available // 2)
     override = getattr(workspace, 'buffer_memory', None)
     if override is not None:
         cap = min(cap, max(bytes_per_frame, override))
+    # The decoder must load a whole chunk. Shrink it before advertising metadata
+    # rather than forcing a minimum one-chunk cache that exceeds the RAM cap.
+    chunk_size = min(chunk_size, len(frames), max(1, cap // bytes_per_frame))
+    # Round to whole chunks so the duration target is not truncated at a boundary.
+    wanted = min(len(frames), math.ceil(target_frames / chunk_size) * chunk_size) * bytes_per_frame
     budget = min(wanted, cap)
     chunks = max(1, min(math.ceil(target_frames / chunk_size), budget // (bytes_per_frame * chunk_size)))
-    return {'seconds': seconds, 'fps': fps, 'max_bytes': budget, 'max_chunks': chunks,
+    return {'seconds': seconds, 'fps': fps, 'max_bytes': budget, 'max_chunks': chunks, 'chunk_size': chunk_size,
             'prefetch_chunks': max(0, chunks - 1), 'available_bytes': available,
             'target_bytes': wanted, 'capped': budget < wanted}
